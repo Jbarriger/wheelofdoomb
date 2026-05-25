@@ -1,10 +1,29 @@
-import csv
-import io
 import os
 from flask import Blueprint, request, jsonify, current_app
 from .models import get_db
+from .socketio_ext import socketio
 
 bp = Blueprint('api', __name__, url_prefix='/api')
+
+
+def _enforce_title_budget(db, watcher_id, points, exclude_title_id=None):
+    """Clamp title points to fit within the watcher's personal point budget."""
+    watcher = db.execute('SELECT points FROM watchers WHERE id = ?', (watcher_id,)).fetchone()
+    if not watcher:
+        return points
+    if exclude_title_id:
+        other_total = db.execute(
+            'SELECT COALESCE(SUM(points), 0) as t FROM titles WHERE watcher_id = ? AND id != ?',
+            (watcher_id, exclude_title_id)
+        ).fetchone()['t']
+    else:
+        other_total = db.execute(
+            'SELECT COALESCE(SUM(points), 0) as t FROM titles WHERE watcher_id = ?',
+            (watcher_id,)
+        ).fetchone()['t']
+    personal_budget = max(1, watcher['points'])
+    max_for_this = max(1, personal_budget - other_total)
+    return min(points, max_for_this)
 
 
 # ── Data ──
@@ -58,6 +77,7 @@ def add_watcher():
 
     db.execute('INSERT INTO watchers (name, points) VALUES (?, ?)', (name, points))
     db.commit()
+    socketio.emit('data_changed', {})
     row = db.execute('SELECT id, name, points FROM watchers WHERE id = last_insert_rowid()').fetchone()
     return jsonify({'id': row['id'], 'name': row['name'], 'points': row['points'], 'titles': []}), 201
 
@@ -69,6 +89,7 @@ def delete_watcher(watcher_id):
     db.execute('DELETE FROM titles WHERE watcher_id = ?', (watcher_id,))
     db.execute('DELETE FROM watchers WHERE id = ?', (watcher_id,))
     db.commit()
+    socketio.emit('data_changed', {})
     return jsonify({'ok': True})
 
 
@@ -95,6 +116,7 @@ def update_watcher_points(watcher_id):
 
     db.execute('UPDATE watchers SET points = ? WHERE id = ?', (new_points, watcher_id))
     db.commit()
+    socketio.emit('data_changed', {})
     return jsonify({'id': watcher_id, 'points': new_points, 'delta': delta})
 
 
@@ -127,15 +149,7 @@ def add_title():
     db = get_db(current_app)
 
     # Enforce point budget: total title points cannot exceed watcher's personal points
-    watcher = db.execute('SELECT points FROM watchers WHERE id = ?', (watcher_id,)).fetchone()
-    if watcher:
-        other_total = db.execute(
-            'SELECT COALESCE(SUM(points), 0) as t FROM titles WHERE watcher_id = ?', (watcher_id,)
-        ).fetchone()['t']
-        personal_budget = max(1, watcher['points'])
-        max_for_this = max(1, personal_budget - other_total)
-        if points > max_for_this:
-            points = max_for_this
+    points = _enforce_title_budget(db, watcher_id, points)
 
     count = db.execute(
         'SELECT COUNT(*) as c FROM titles WHERE watcher_id = ?', (watcher_id,)
@@ -146,6 +160,7 @@ def add_title():
     db.execute('INSERT INTO titles (watcher_id, name, points) VALUES (?, ?, ?)',
                (watcher_id, name, points))
     db.commit()
+    socketio.emit('data_changed', {})
     row = db.execute('SELECT id, watcher_id, name, points FROM titles WHERE id = last_insert_rowid()').fetchone()
     return jsonify(dict(row)), 201
 
@@ -178,16 +193,7 @@ def update_title(title_id):
         # Enforce point budget
         title_row = db.execute('SELECT watcher_id FROM titles WHERE id = ?', (title_id,)).fetchone()
         if title_row:
-            watcher = db.execute('SELECT points FROM watchers WHERE id = ?', (title_row['watcher_id'],)).fetchone()
-            if watcher:
-                other_total = db.execute(
-                    'SELECT COALESCE(SUM(points), 0) as t FROM titles WHERE watcher_id = ? AND id != ?',
-                    (title_row['watcher_id'], title_id)
-                ).fetchone()['t']
-                personal_budget = max(1, watcher['points'])
-                max_for_this = max(1, personal_budget - other_total)
-                if points > max_for_this:
-                    points = max_for_this
+            points = _enforce_title_budget(db, title_row['watcher_id'], points, exclude_title_id=title_id)
 
         updates.append('points = ?')
         params.append(points)
@@ -198,6 +204,7 @@ def update_title(title_id):
     params.append(title_id)
     db.execute(f'UPDATE titles SET {", ".join(updates)} WHERE id = ?', params)
     db.commit()
+    socketio.emit('data_changed', {})
     row = db.execute('SELECT id, watcher_id, name, points FROM titles WHERE id = ?', (title_id,)).fetchone()
     return jsonify(dict(row))
 
@@ -208,6 +215,7 @@ def delete_title(title_id):
     db = get_db(current_app)
     db.execute('DELETE FROM titles WHERE id = ?', (title_id,))
     db.commit()
+    socketio.emit('data_changed', {})
     return jsonify({'ok': True})
 
 
@@ -252,6 +260,7 @@ def save_winner():
         (title_name, watcher_name, weight, total_weight, participants)
     )
     db.commit()
+    socketio.emit('winners_changed', {})
     row = db.execute('SELECT id, title_name, watcher_name, weight, total_weight, participants, won_at FROM winners WHERE id = last_insert_rowid()').fetchone()
     return jsonify(dict(row)), 201
 
@@ -262,6 +271,7 @@ def clear_winners():
     db = get_db(current_app)
     db.execute('DELETE FROM winners')
     db.commit()
+    socketio.emit('winners_changed', {})
     return jsonify({'ok': True})
 
 
@@ -279,6 +289,7 @@ def set_winner_judgement(winner_id):
     db = get_db(current_app)
     db.execute('UPDATE winners SET judgement = ? WHERE id = ?', (judgement, winner_id))
     db.commit()
+    socketio.emit('winners_changed', {})
     return jsonify({'ok': True, 'judgement': judgement, 'winner_id': winner_id})
 
 
@@ -339,6 +350,8 @@ def process_win():
 
     db.commit()
 
+    socketio.emit('data_changed', {})
+
     # Get updated winner points
     winner = db.execute('SELECT id, name, points FROM watchers WHERE id = ?', (winner_id,)).fetchone()
 
@@ -363,7 +376,7 @@ def punish_movie():
     db = get_db(current_app)
 
     # Get winner
-    winner = db.execute('SELECT name, points FROM watchers WHERE id = ?', (winner_id,)).fetchone()
+    winner = db.execute('SELECT id, name, points FROM watchers WHERE id = ?', (winner_id,)).fetchone()
     if not winner:
         return jsonify({'error': 'Winner not found'}), 404
 
@@ -378,12 +391,8 @@ def punish_movie():
         if not participant:
             continue
 
-        # Steal 1 point from winner (can go negative)
-        new_winner_pts = winner['points'] - 1
-        participant_pts = db.execute('SELECT points FROM watchers WHERE id = ?', (pid,)).fetchone()
-        new_participant_pts = participant_pts['points'] + 1 if participant_pts else 1
-        db.execute('UPDATE watchers SET points = ? WHERE id = ?', (new_winner_pts, winner_id))
-        db.execute('UPDATE watchers SET points = ? WHERE id = ?', (new_participant_pts, pid))
+        # Each non-winner steals 1 point — give them +1 immediately
+        db.execute('UPDATE watchers SET points = points + 1 WHERE id = ?', (pid,))
 
         # Record the theft
         db.execute('INSERT INTO thefts (thief_id, victim_id, amount) VALUES (?, ?, 1)',
@@ -395,9 +404,15 @@ def punish_movie():
             'amount': 1,
         })
         total_theft += 1
-        winner = {'name': winner['name'], 'points': new_winner_pts}  # update local ref
+
+    # Single winner update: deduct total stolen points at once
+    if total_theft > 0:
+        new_winner_pts = winner['points'] - total_theft
+        db.execute('UPDATE watchers SET points = ? WHERE id = ?', (new_winner_pts, winner_id))
 
     db.commit()
+
+    socketio.emit('data_changed', {})
 
     # Get final winner points
     final_winner = db.execute('SELECT id, name, points FROM watchers WHERE id = ?', (winner_id,)).fetchone()

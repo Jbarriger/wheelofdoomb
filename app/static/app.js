@@ -11,6 +11,21 @@ let wheelRotation = 0;
 let animFrameId = null;
 let winners = [];
 
+// ---- localStorage helpers ----
+function saveActiveIds() {
+    localStorage.setItem('wheelActiveIds', JSON.stringify([...activeIds]));
+}
+
+function loadActiveIds() {
+    try {
+        const saved = localStorage.getItem('wheelActiveIds');
+        if (saved) {
+            const arr = JSON.parse(saved);
+            if (Array.isArray(arr)) activeIds = new Set(arr);
+        }
+    } catch (e) { /* ignore corrupt data */ }
+}
+
 // ---- DOM refs ----
 const canvas = document.getElementById('wheelCanvas');
 const ctx = canvas.getContext('2d');
@@ -132,22 +147,6 @@ async function adjustWatcherPoints(id, delta) {
     return result;
 }
 
-async function addTitle(watcherId, name, points) {
-    const res = await fetch('/api/titles', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ watcher_id: watcherId, name, points }),
-    });
-    if (!res.ok) {
-        const d = await res.json();
-        throw new Error(d.error || 'Failed to add title');
-    }
-    const title = await res.json();
-    const watcher = allWatchers.find(w => w.id === watcherId);
-    if (watcher) watcher.titles.push(title);
-    return title;
-}
-
 async function updateTitle(titleId, updates) {
     const res = await fetch(`/api/titles/${titleId}`, {
         method: 'PUT',
@@ -245,6 +244,7 @@ function renderParticipantList() {
         cb.addEventListener('change', () => {
             if (cb.checked) activeIds.add(w.id);
             else activeIds.delete(w.id);
+            saveActiveIds();
         });
 
         const name = document.createElement('span');
@@ -274,6 +274,43 @@ function closeParticipantsModal() {
 // ============================================================
 //  Rendering — Watchers (active only)
 // ============================================================
+
+function refreshWatchersPreservingFocus() {
+    // Save the focused input's position before re-render
+    const el = document.activeElement;
+    let focusInfo = null;
+    if (el && (el.classList.contains('title-input') || el.classList.contains('title-points'))) {
+        const row = el.closest('.title-row');
+        const card = el.closest('.watcher-card');
+        if (row && card) {
+            const watcherId = parseInt(card.dataset.watcherId);
+            const allRows = card.querySelectorAll('.title-row');
+            const titleIndex = Array.from(allRows).indexOf(row);
+            focusInfo = { watcherId, titleIndex, isName: el.classList.contains('title-input'),
+                         selectionStart: el.selectionStart || 0, selectionEnd: el.selectionEnd || 0 };
+        }
+    }
+
+    renderWatchers();
+
+    // Restore focus to the same input at the same caret position
+    if (focusInfo) {
+        const newCard = document.querySelector(`.watcher-card[data-watcher-id="${focusInfo.watcherId}"]`);
+        if (newCard) {
+            const newRows = newCard.querySelectorAll('.title-row');
+            const newRow = newRows[focusInfo.titleIndex];
+            if (newRow) {
+                const input = focusInfo.isName
+                    ? newRow.querySelector('.title-input')
+                    : newRow.querySelector('.title-points');
+                if (input) {
+                    input.focus();
+                    try { input.setSelectionRange(focusInfo.selectionStart, focusInfo.selectionEnd); } catch (e) {}
+                }
+            }
+        }
+    }
+}
 
 function renderWatchers() {
     watchersContainer.innerHTML = '';
@@ -330,12 +367,15 @@ function renderWatchers() {
             card.appendChild(createTitleRow(w, w.titles[i], i));
         }
 
-        // Add-title button — limited by point budget
-        const maxTitles = w.points > 0 ? 3 : 1;
-        if (w.titles.length < maxTitles) {
+        // Add-title button — available while under 3 titles and remaining budget ≥ 1
+        const personalBudget = Math.max(1, w.points);
+        const currentTitleTotal = w.titles.reduce((sum, t) => sum + (parseInt(t.points) || 0), 0);
+        const remainingBudget = Math.max(0, personalBudget - currentTitleTotal);
+        const canAddMore = w.titles.length < 3 && remainingBudget >= 1;
+        if (canAddMore) {
             const addBtn = document.createElement('button');
             addBtn.className = 'add-title-btn';
-            addBtn.textContent = `➕ Add Title (${w.titles.length}/${maxTitles})`;
+            addBtn.textContent = `➕ Add Title (${w.titles.length}/3 · ${remainingBudget} pts left)`;
             addBtn.addEventListener('click', () => {
                 w.titles.push({ id: 'new_' + Date.now(), name: '', points: 1 });
                 renderWatchers();
@@ -379,57 +419,80 @@ function createTitleRow(watcher, title, index) {
     plusBtn.textContent = '+';
 
     let saveTimer = null;
+    let savePending = false;
+    let saveQueued = false;
+    let saveNeedsRefresh = false;
     async function save() {
-        const name = nameInput.value.trim();
-        let pts = parseInt(pointsInput.value) || 1;
-        if (pts < 1) pts = 1;
-        if (pts > 100) pts = 100;
-
-        // Enforce point budget: total title points cannot exceed watcher's personal points
-        const personalPts = Math.max(1, watcher.points);
-        const otherTotal = watcher.titles
-            .filter(t => t !== title)
-            .reduce((sum, t) => sum + (parseInt(t.points) || 0), 0);
-        const maxForThis = Math.max(1, personalPts - otherTotal);
-        if (pts > maxForThis) {
-            pts = maxForThis;
-            pointsInput.value = pts;
+        if (savePending) {
+            saveQueued = true;
+            return;
         }
-        title.points = pts;
+        savePending = true;
+        saveQueued = false;
+        try {
+            const name = nameInput.value.trim();
+            let pts = parseInt(pointsInput.value) || 1;
+            if (pts < 1) pts = 1;
+            if (pts > 100) pts = 100;
 
-        if (typeof title.id === 'number') {
-            // Existing title — update on backend
-            try {
-                await updateTitle(title.id, { name, points: pts });
-                computeSegments();
-                drawWheel(wheelRotation);
-                updateWheelInfo();
-                spinBtn.disabled = segments.length === 0;
-            } catch (e) {}
-        } else if (name) {
-            // New title — create on backend directly (no addTitle to avoid duplicate push)
-            try {
-                const res = await fetch('/api/titles', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ watcher_id: watcher.id, name, points: pts }),
-                });
-                if (!res.ok) return;
-                const created = await res.json();
-                title.id = created.id; // swap temp string ID for real numeric ID
-                title.name = name;
-                title.points = pts;
-                computeSegments();
-                drawWheel(wheelRotation);
-                updateWheelInfo();
-                spinBtn.disabled = segments.length === 0;
-            } catch (e) {}
+            // Enforce point budget: total title points cannot exceed watcher's personal points
+            const personalPts = Math.max(1, watcher.points);
+            const otherTotal = watcher.titles
+                .filter(t => t.id !== title.id)
+                .reduce((sum, t) => sum + (parseInt(t.points) || 0), 0);
+            const maxForThis = Math.max(1, personalPts - otherTotal);
+            if (pts > maxForThis) {
+                pts = maxForThis;
+                pointsInput.value = pts;
+            }
+            title.points = pts;
+
+            const shouldRefresh = saveNeedsRefresh;
+            saveNeedsRefresh = false;
+
+            if (typeof title.id === 'number') {
+                // Existing title — update on backend
+                try {
+                    await updateTitle(title.id, { name, points: pts });
+                    computeSegments();
+                    drawWheel(wheelRotation);
+                    updateWheelInfo();
+                    if (shouldRefresh) refreshWatchersPreservingFocus();
+                    spinBtn.disabled = segments.length === 0;
+                } catch (e) {}
+            } else if (name) {
+                // New title — create on backend directly
+                try {
+                    const res = await fetch('/api/titles', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ watcher_id: watcher.id, name, points: pts }),
+                    });
+                    if (!res.ok) return;
+                    const created = await res.json();
+                    title.id = created.id; // swap temp string ID for real numeric ID
+                    title.name = name;
+                    title.points = pts;
+                    computeSegments();
+                    drawWheel(wheelRotation);
+                    updateWheelInfo();
+                    if (shouldRefresh) refreshWatchersPreservingFocus();
+                    spinBtn.disabled = segments.length === 0;
+                } catch (e) {}
+            }
+        } finally {
+            savePending = false;
+            if (saveQueued) {
+                // Another save was requested while we were running; retry with latest values
+                setTimeout(save, 50);
+            }
         }
     }
 
     nameInput.addEventListener('input', () => {
         title.name = nameInput.value;
         clearTimeout(saveTimer);
+        saveNeedsRefresh = false;
         saveTimer = setTimeout(save, 400);
     });
 
@@ -440,6 +503,7 @@ function createTitleRow(watcher, title, index) {
             pointsInput.value = val;
             title.points = val;
             clearTimeout(saveTimer);
+            saveNeedsRefresh = true;
             saveTimer = setTimeout(save, 200);
         }
     });
@@ -450,6 +514,7 @@ function createTitleRow(watcher, title, index) {
         if (val > 100) val = 100;
         title.points = val;
         clearTimeout(saveTimer);
+        saveNeedsRefresh = true;
         saveTimer = setTimeout(save, 400);
     });
 
@@ -460,6 +525,7 @@ function createTitleRow(watcher, title, index) {
             pointsInput.value = val;
             title.points = val;
             clearTimeout(saveTimer);
+            saveNeedsRefresh = true;
             saveTimer = setTimeout(save, 200);
         }
     });
@@ -687,8 +753,8 @@ function onSpinComplete() {
                     const w = allWatchers.find(x => x.id === data.winner.id);
                     if (w) w.points = data.winner.points;
                 }
-                // Refresh display
-                renderWatchers();
+                // Refresh display and redraw wheel
+                renderAll();
                 // Show judgement buttons
                 passBtn.classList.remove('faded');
                 punishBtn.classList.remove('faded');
@@ -951,10 +1017,7 @@ punishBtn.addEventListener('click', async () => {
             const w = allWatchers.find(x => x.id === data.winner.id);
             if (w) w.points = data.winner.points;
         }
-        // Update thief points (they were adjusted in API)
-        for (const s of data.stolen_from) {
-            // Refresh by fetching latest data
-        }
+        // Full refresh to get latest points
         await fetchData(); // full refresh to get latest points
         renderAll();
         returnMsg.textContent = `👎 Punished! ${lastWinnerInfo.seg.watcherName} lost ${data.total_theft} point${data.total_theft !== 1 ? 's' : ''}`;
@@ -1019,6 +1082,10 @@ function renderAdminWatchers() {
         saveBtn.title = 'Save points';
         saveBtn.addEventListener('click', async () => {
             const newPts = parseInt(ptsInput.value) || 0;
+            if (newPts < -9999 || newPts > 9999) {
+                alert('Points must be between -9999 and 9999');
+                return;
+            }
             try {
                 await adjustWatcherPoints(w.id, newPts - w.points);
                 await fetchData();
@@ -1067,6 +1134,7 @@ adminAddBtn.addEventListener('click', async () => {
     try {
         const w = await addWatcher(name, pts);
         activeIds.add(w.id);
+        saveActiveIds();
         adminNewName.value = '';
         adminNewPoints.value = '0';
         renderAdminWatchers();
@@ -1099,7 +1167,32 @@ clearWinnersBtn.addEventListener('click', async () => {
 //  Init
 // ============================================================
 
+// ---- WebSocket real-time sync ----
+const socket = io();
+
+socket.on('data_changed', () => {
+    // Don't interrupt if user is in a modal or editing a title
+    if (!participantsModal.classList.contains('hidden') ||
+        !winnersModal.classList.contains('hidden') ||
+        !adminModal.classList.contains('hidden')) {
+        return;
+    }
+    const active = document.activeElement;
+    if (active && active.closest('.title-row')) {
+        return;
+    }
+    fetchData().then(renderAll);
+});
+
+socket.on('winners_changed', () => {
+    if (!winnersModal.classList.contains('hidden')) {
+        fetchWinners();
+        renderWinnersList();
+    }
+});
+
 (async function init() {
+    loadActiveIds();
     await fetchData();
     await fetchWinners();
     renderAll();

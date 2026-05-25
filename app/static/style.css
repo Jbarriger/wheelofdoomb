@@ -530,17 +530,6 @@ header h1 sup {
     animation: confetti-fall linear forwards;
 }
 
-@keyframes confetti-fall {
-    0% {
-        transform: translateY(0) rotate(0deg) scale(1);
-        opacity: 1;
-    }
-    100% {
-        transform: translateY(100vh) rotate(720deg) scale(0.3);
-        opacity: 0;
-    }
-}
-
 /* ===== Modal ===== */
 .modal-overlay {
     position: fixed;

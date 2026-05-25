@@ -27,6 +27,7 @@ WORKDIR /app
 COPY app/          app/
 COPY nginx/        nginx/
 COPY run.sh        .
+COPY run.py        .
 
 # Permissions
 RUN chmod +x run.sh

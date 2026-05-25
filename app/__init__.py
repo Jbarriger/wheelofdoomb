@@ -1,5 +1,6 @@
 import os
 from flask import Flask
+from .socketio_ext import socketio
 
 
 def create_app():
@@ -14,6 +15,9 @@ def create_app():
     # Init DB on startup
     from . import models
     models.init_db(app)
+
+    # Init SocketIO
+    socketio.init_app(app, cors_allowed_origins="*")
 
     # Register blueprints
     from . import routes
