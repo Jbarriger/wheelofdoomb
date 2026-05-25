@@ -24,11 +24,57 @@ def init_db(app):
     with app.app_context():
         db = get_db(app)
         db.execute('''
-            CREATE TABLE IF NOT EXISTS movies (
+            CREATE TABLE IF NOT EXISTS watchers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
+                points INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now'))
             )
         ''')
+        # Migration: add points column if upgrading from older schema
+        try:
+            db.execute('ALTER TABLE watchers ADD COLUMN points INTEGER NOT NULL DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass  # column already exists
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS titles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                watcher_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                points INTEGER NOT NULL DEFAULT 1,
+                created_at TEXT DEFAULT (datetime('now')),
+                FOREIGN KEY (watcher_id) REFERENCES watchers(id) ON DELETE CASCADE
+            )
+        ''')
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS winners (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title_name TEXT NOT NULL,
+                watcher_name TEXT NOT NULL,
+                weight INTEGER NOT NULL,
+                total_weight INTEGER NOT NULL,
+                participants TEXT DEFAULT '',
+                won_at TEXT DEFAULT (datetime('now'))
+            )
+        ''')
+        # Migration: add participants column if upgrading from older schema
+        try:
+            db.execute('ALTER TABLE winners ADD COLUMN participants TEXT DEFAULT ""')
+        except sqlite3.OperationalError:
+            pass
+        db.execute('''
+            CREATE TABLE IF NOT EXISTS thefts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                thief_id INTEGER NOT NULL,
+                victim_id INTEGER NOT NULL,
+                amount INTEGER NOT NULL DEFAULT 1,
+                stolen_at TEXT DEFAULT (datetime('now'))
+            )
+        ''')
+        # Migration: add judgement column to winners
+        try:
+            db.execute('ALTER TABLE winners ADD COLUMN judgement TEXT DEFAULT ""')
+        except sqlite3.OperationalError:
+            pass
         db.commit()
     app.teardown_appcontext(close_db)

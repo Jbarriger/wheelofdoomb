@@ -1,24 +1,76 @@
 /* ============================================================
-   Wheel of Doom(b) — Frontend App
+   Wheel of Doom(b) — Watcher Points + Participant Selector
    ============================================================ */
 
 // ---- State ----
-let movies = [];
+let allWatchers = [];    // [{id, name, points, titles}]
+let activeIds = new Set(); // set of watcher IDs currently participating
+let segments = [];
 let isSpinning = false;
-let wheelRotation = 0; // radians
+let wheelRotation = 0;
 let animFrameId = null;
+let winners = [];
 
 // ---- DOM refs ----
 const canvas = document.getElementById('wheelCanvas');
 const ctx = canvas.getContext('2d');
-const movieList = document.getElementById('movieList');
+const addWatcherBtn = document.getElementById('addWatcherBtn');
+const watchersContainer = document.getElementById('watchersContainer');
 const emptyMsg = document.getElementById('emptyMsg');
-const movieInput = document.getElementById('movieInput');
-const addBtn = document.getElementById('addBtn');
 const spinBtn = document.getElementById('spinBtn');
-const clearBtn = document.getElementById('clearBtn');
 const winnerDisplay = document.getElementById('winnerDisplay');
 const winnerText = document.getElementById('winnerText');
+const winnerDetails = document.getElementById('winnerDetails');
+const totalWeight = document.getElementById('totalWeight');
+const wheelInfo = document.getElementById('wheelInfo');
+const winnersBtn = document.getElementById('winnersBtn');
+const winnersModal = document.getElementById('winnersModal');
+const modalCloseBtn = document.getElementById('modalCloseBtn');
+const winnersList = document.getElementById('winnersList');
+const clearWinnersBtn = document.getElementById('clearWinnersBtn');
+
+// Participant modal refs
+const participantsModal = document.getElementById('participantsModal');
+const participantsCloseBtn = document.getElementById('participantsCloseBtn');
+const allWatchersList = document.getElementById('allWatchersList');
+const newWatcherName = document.getElementById('newWatcherName');
+const newWatcherPoints = document.getElementById('newWatcherPoints');
+const addNewWatcherBtn = document.getElementById('addNewWatcherBtn');
+const startMovieNightBtn = document.getElementById('startMovieNightBtn');
+
+// Judgement refs
+const passBtn = document.getElementById('passBtn');
+const punishBtn = document.getElementById('punishBtn');
+const returnMsg = document.getElementById('returnMsg');
+let lastWinnerInfo = null; // {seg, totalPts, winnerId}
+
+// Admin refs
+const adminBtn = document.getElementById('adminBtn');
+const adminModal = document.getElementById('adminModal');
+const adminCloseBtn = document.getElementById('adminCloseBtn');
+const adminNewName = document.getElementById('adminNewName');
+const adminNewPoints = document.getElementById('adminNewPoints');
+const adminAddBtn = document.getElementById('adminAddBtn');
+const adminWatchersList = document.getElementById('adminWatchersList');
+
+async function verifyAdminPassword() {
+    const pw = prompt('🔒 Enter admin password:');
+    if (pw === null) return false;
+    try {
+        const res = await fetch('/api/admin/verify', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ password: pw }),
+        });
+        const data = await res.json();
+        if (data.ok) return true;
+        alert('Incorrect password!');
+        return false;
+    } catch {
+        alert('Failed to verify password');
+        return false;
+    }
+}
 
 // ---- Colors ----
 const SEGMENT_COLORS = [
@@ -37,65 +89,398 @@ const radius = canvas.width / 2 - 10;
 //  API
 // ============================================================
 
-async function fetchMovies() {
-    const res = await fetch('/api/movies');
-    movies = await res.json();
+async function fetchData() {
+    const res = await fetch('/api/data');
+    allWatchers = await res.json();
 }
 
-async function addMovie(name) {
-    const res = await fetch('/api/movies', {
+async function addWatcher(name, points = 0) {
+    const res = await fetch('/api/watchers', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name }),
+        body: JSON.stringify({ name, points }),
     });
     if (!res.ok) {
-        const data = await res.json();
-        throw new Error(data.error || 'Failed to add movie');
+        const d = await res.json();
+        throw new Error(d.error || 'Failed to add watcher');
     }
-    const movie = await res.json();
-    movies.push(movie);
+    const watcher = await res.json();
+    allWatchers.push(watcher);
+    return watcher;
 }
 
-async function deleteMovie(id) {
-    await fetch(`/api/movies/${id}`, { method: 'DELETE' });
-    movies = movies.filter(m => m.id !== id);
+async function deleteWatcher(id) {
+    await fetch(`/api/watchers/${id}`, { method: 'DELETE' });
+    allWatchers = allWatchers.filter(w => w.id !== id);
+    activeIds.delete(id);
 }
 
-async function clearMovies() {
-    await fetch('/api/movies', { method: 'DELETE' });
-    movies = [];
+async function adjustWatcherPoints(id, delta) {
+    const res = await fetch(`/api/watchers/${id}/points`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ delta }),
+    });
+    if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.error || 'Failed to adjust points');
+    }
+    const result = await res.json();
+    // Update in local data
+    const w = allWatchers.find(x => x.id === id);
+    if (w) w.points = result.points;
+    return result;
+}
+
+async function addTitle(watcherId, name, points) {
+    const res = await fetch('/api/titles', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ watcher_id: watcherId, name, points }),
+    });
+    if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.error || 'Failed to add title');
+    }
+    const title = await res.json();
+    const watcher = allWatchers.find(w => w.id === watcherId);
+    if (watcher) watcher.titles.push(title);
+    return title;
+}
+
+async function updateTitle(titleId, updates) {
+    const res = await fetch(`/api/titles/${titleId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(updates),
+    });
+    if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.error || 'Failed to update title');
+    }
+    const title = await res.json();
+    for (const w of allWatchers) {
+        const idx = w.titles.findIndex(t => t.id === titleId);
+        if (idx !== -1) {
+            w.titles[idx] = { ...w.titles[idx], ...title };
+        }
+    }
+    return title;
+}
+
+async function deleteTitle(titleId) {
+    await fetch(`/api/titles/${titleId}`, { method: 'DELETE' });
+    for (const w of allWatchers) {
+        w.titles = w.titles.filter(t => t.id !== titleId);
+    }
+}
+
+async function fetchWinners() {
+    const res = await fetch('/api/winners');
+    winners = await res.json();
+}
+
+async function saveWinner(titleName, watcherName, weight, totalWeight, participants) {
+    const res = await fetch('/api/winners', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+            title_name: titleName, watcher_name: watcherName,
+            weight, total_weight: totalWeight,
+            participants: participants || '',
+        }),
+    });
+    if (!res.ok) return null;
+    return await res.json();
+}
+
+async function clearAllWinners() {
+    await fetch('/api/winners', { method: 'DELETE' });
+    winners = [];
 }
 
 // ============================================================
-//  Rendering
+//  Active watchers helpers
 // ============================================================
 
-function renderList() {
-    movieList.innerHTML = '';
-    if (movies.length === 0) {
+function getActiveWatchers() {
+    return allWatchers.filter(w => activeIds.has(w.id));
+}
+
+function getActiveSegments() {
+    const segs = [];
+    for (const w of allWatchers) {
+        if (!activeIds.has(w.id)) continue;
+        for (const t of w.titles) {
+            if (t.name.trim()) {
+                segs.push({ name: t.name, points: t.points, watcherName: w.name, titleId: t.id });
+            }
+        }
+    }
+    return segs;
+}
+
+function getTotalWeight() {
+    return segments.reduce((sum, s) => sum + s.points, 0);
+}
+
+// ============================================================
+//  Participant Dialog
+// ============================================================
+
+function renderParticipantList() {
+    allWatchersList.innerHTML = '';
+    if (allWatchers.length === 0) {
+        allWatchersList.innerHTML = '<p class="empty-msg" style="padding:1rem 0">No watchers yet! Add one below. ✨</p>';
+        return;
+    }
+    for (const w of allWatchers) {
+        const row = document.createElement('div');
+        row.className = 'participant-row';
+
+        const cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.className = 'participant-check';
+        cb.checked = activeIds.has(w.id);
+        cb.addEventListener('change', () => {
+            if (cb.checked) activeIds.add(w.id);
+            else activeIds.delete(w.id);
+        });
+
+        const name = document.createElement('span');
+        name.className = 'participant-name';
+        name.textContent = w.name;
+
+        const pts = document.createElement('span');
+        pts.className = 'participant-pts';
+        pts.textContent = `${w.points} pts`;
+
+        row.appendChild(cb);
+        row.appendChild(name);
+        row.appendChild(pts);
+        allWatchersList.appendChild(row);
+    }
+}
+
+function openParticipantsModal() {
+    renderParticipantList();
+    participantsModal.classList.remove('hidden');
+}
+
+function closeParticipantsModal() {
+    participantsModal.classList.add('hidden');
+}
+
+// ============================================================
+//  Rendering — Watchers (active only)
+// ============================================================
+
+function renderWatchers() {
+    watchersContainer.innerHTML = '';
+    const active = getActiveWatchers();
+
+    if (active.length === 0) {
         emptyMsg.style.display = 'block';
-        clearBtn.style.display = 'none';
         spinBtn.disabled = true;
         return;
     }
 
     emptyMsg.style.display = 'none';
-    clearBtn.style.display = 'inline-block';
-    spinBtn.disabled = false;
+    spinBtn.disabled = segments.length === 0;
 
-    movies.forEach(m => {
-        const li = document.createElement('li');
-        li.innerHTML = `
-            <span class="movie-name">${escHtml(m.name)}</span>
-            <button class="del-btn" data-id="${m.id}">✕</button>
-        `;
-        li.querySelector('.del-btn').addEventListener('click', async () => {
-            await deleteMovie(m.id);
-            renderList();
-            drawWheel(wheelRotation);
+    for (const w of active) {
+        const card = document.createElement('div');
+        card.className = 'watcher-card';
+        card.dataset.watcherId = w.id;
+
+        // Header
+        const header = document.createElement('div');
+        header.className = 'watcher-header';
+        const rightDiv = document.createElement('div');
+        if (w.titles.length > 0) {
+            const clearBtn = document.createElement('button');
+            clearBtn.className = 'clear-titles-btn';
+            clearBtn.textContent = '🗑️ Clear Titles';
+            clearBtn.addEventListener('click', async () => {
+                for (const t of w.titles) {
+                    if (typeof t.id === 'number') await deleteTitle(t.id);
+                }
+                w.titles = [];
+                computeSegments();
+                renderAll();
+            });
+            rightDiv.appendChild(clearBtn);
+        }
+        const delBtn = document.createElement('button');
+        delBtn.className = 'watcher-del-btn';
+        delBtn.textContent = '✕';
+        delBtn.addEventListener('click', async () => {
+            await deleteWatcher(w.id);
+            computeSegments();
+            renderAll();
         });
-        movieList.appendChild(li);
+        rightDiv.appendChild(delBtn);
+        const ptsClass = w.points >= 0 ? 'pts-badge pos' : 'pts-badge neg';
+        header.innerHTML = `<span class="watcher-name">👤 ${escHtml(w.name)} <span class="${ptsClass}">${w.points}</span></span>`;
+        header.appendChild(rightDiv);
+        card.appendChild(header);
+
+        // Title rows
+        for (let i = 0; i < Math.min(w.titles.length, 3); i++) {
+            card.appendChild(createTitleRow(w, w.titles[i], i));
+        }
+
+        // Add-title button — limited by point budget
+        const maxTitles = w.points > 0 ? 3 : 1;
+        if (w.titles.length < maxTitles) {
+            const addBtn = document.createElement('button');
+            addBtn.className = 'add-title-btn';
+            addBtn.textContent = `➕ Add Title (${w.titles.length}/${maxTitles})`;
+            addBtn.addEventListener('click', () => {
+                w.titles.push({ id: 'new_' + Date.now(), name: '', points: 1 });
+                renderWatchers();
+                const inputs = card.querySelectorAll('.title-input');
+                const last = inputs[inputs.length - 1];
+                if (last) last.focus();
+            });
+            card.appendChild(addBtn);
+        }
+
+        watchersContainer.appendChild(card);
+    }
+
+    updateWheelInfo();
+}
+
+function createTitleRow(watcher, title, index) {
+    const row = document.createElement('div');
+    row.className = 'title-row';
+
+    const nameInput = document.createElement('input');
+    nameInput.type = 'text';
+    nameInput.className = 'title-input';
+    nameInput.placeholder = `Title ${index + 1}`;
+    nameInput.value = title.name;
+    nameInput.maxLength = 200;
+
+    const minusBtn = document.createElement('button');
+    minusBtn.className = 'point-step-btn';
+    minusBtn.textContent = '−';
+
+    const pointsInput = document.createElement('input');
+    pointsInput.type = 'number';
+    pointsInput.className = 'title-points';
+    pointsInput.min = 1;
+    pointsInput.max = 100;
+    pointsInput.value = title.points || 1;
+
+    const plusBtn = document.createElement('button');
+    plusBtn.className = 'point-step-btn';
+    plusBtn.textContent = '+';
+
+    let saveTimer = null;
+    async function save() {
+        const name = nameInput.value.trim();
+        let pts = parseInt(pointsInput.value) || 1;
+        if (pts < 1) pts = 1;
+        if (pts > 100) pts = 100;
+
+        // Enforce point budget: total title points cannot exceed watcher's personal points
+        const personalPts = Math.max(1, watcher.points);
+        const otherTotal = watcher.titles
+            .filter(t => t !== title)
+            .reduce((sum, t) => sum + (parseInt(t.points) || 0), 0);
+        const maxForThis = Math.max(1, personalPts - otherTotal);
+        if (pts > maxForThis) {
+            pts = maxForThis;
+            pointsInput.value = pts;
+        }
+        title.points = pts;
+
+        if (typeof title.id === 'number') {
+            // Existing title — update on backend
+            try {
+                await updateTitle(title.id, { name, points: pts });
+                computeSegments();
+                drawWheel(wheelRotation);
+                updateWheelInfo();
+                spinBtn.disabled = segments.length === 0;
+            } catch (e) {}
+        } else if (name) {
+            // New title — create on backend directly (no addTitle to avoid duplicate push)
+            try {
+                const res = await fetch('/api/titles', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ watcher_id: watcher.id, name, points: pts }),
+                });
+                if (!res.ok) return;
+                const created = await res.json();
+                title.id = created.id; // swap temp string ID for real numeric ID
+                title.name = name;
+                title.points = pts;
+                computeSegments();
+                drawWheel(wheelRotation);
+                updateWheelInfo();
+                spinBtn.disabled = segments.length === 0;
+            } catch (e) {}
+        }
+    }
+
+    nameInput.addEventListener('input', () => {
+        title.name = nameInput.value;
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(save, 400);
     });
+
+    minusBtn.addEventListener('click', () => {
+        let val = parseInt(pointsInput.value) || 1;
+        if (val > 1) {
+            val--;
+            pointsInput.value = val;
+            title.points = val;
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(save, 200);
+        }
+    });
+
+    pointsInput.addEventListener('input', () => {
+        let val = parseInt(pointsInput.value) || 1;
+        if (val < 1) val = 1;
+        if (val > 100) val = 100;
+        title.points = val;
+        clearTimeout(saveTimer);
+        saveTimer = setTimeout(save, 400);
+    });
+
+    plusBtn.addEventListener('click', () => {
+        let val = parseInt(pointsInput.value) || 1;
+        if (val < 100) {
+            val++;
+            pointsInput.value = val;
+            title.points = val;
+            clearTimeout(saveTimer);
+            saveTimer = setTimeout(save, 200);
+        }
+    });
+
+    row.appendChild(nameInput);
+    row.appendChild(minusBtn);
+    row.appendChild(pointsInput);
+    row.appendChild(plusBtn);
+
+    const delBtn = document.createElement('button');
+    delBtn.className = 'title-del-btn';
+    delBtn.textContent = '✕';
+    delBtn.addEventListener('click', async () => {
+        if (typeof title.id === 'number') await deleteTitle(title.id);
+        watcher.titles = watcher.titles.filter(t => t !== title);
+        computeSegments();
+        renderAll();
+    });
+    row.appendChild(delBtn);
+
+    return row;
 }
 
 function escHtml(s) {
@@ -111,38 +496,36 @@ function escHtml(s) {
 function drawWheel(rotation) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    const count = movies.length;
+    const count = segments.length;
     if (count === 0) {
-        // Empty state
         ctx.beginPath();
         ctx.arc(cx, cy, radius, 0, Math.PI * 2);
         ctx.fillStyle = '#1a1a2e';
         ctx.fill();
         ctx.strokeStyle = '#2a2a3e';
-        ctx.lineWidth = 3;
+        ctx.lineWidth = 12;
         ctx.stroke();
         ctx.fillStyle = '#555';
-        ctx.font = '16px sans-serif';
+        ctx.font = '60px sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('Add some movies!', cx, cy);
+        ctx.fillText('Add some titles!', cx, cy);
         return;
     }
 
-    const arc = (2 * Math.PI) / count;
+    const totalPts = getTotalWeight();
 
-    // Draw outer ring
     ctx.beginPath();
-    ctx.arc(cx, cy, radius + 4, 0, Math.PI * 2);
+    ctx.arc(cx, cy, radius + 14, 0, Math.PI * 2);
     ctx.fillStyle = '#2a2a3e';
     ctx.fill();
 
-    // Draw segments
+    let currentAngle = rotation;
     for (let i = 0; i < count; i++) {
-        const startAngle = rotation + i * arc;
+        const arc = (segments[i].points / totalPts) * Math.PI * 2;
+        const startAngle = currentAngle;
         const endAngle = startAngle + arc;
 
-        // Segment fill
         ctx.beginPath();
         ctx.moveTo(cx, cy);
         ctx.arc(cx, cy, radius, startAngle, endAngle);
@@ -150,24 +533,21 @@ function drawWheel(rotation) {
         ctx.fillStyle = SEGMENT_COLORS[i % SEGMENT_COLORS.length];
         ctx.fill();
 
-        // Segment border
         ctx.strokeStyle = '#1a1a2e';
-        ctx.lineWidth = 2;
+        ctx.lineWidth = 7;
         ctx.stroke();
 
-        // Text along the segment
         ctx.save();
         ctx.translate(cx, cy);
         ctx.rotate(startAngle + arc / 2);
-
         ctx.textAlign = 'right';
         ctx.textBaseline = 'middle';
         ctx.fillStyle = '#1a1a2e';
-        const fontSize = count > 12 ? 11 : count > 6 ? 13 : 15;
+        const fontSize = count > 12 ? 34 : count > 6 ? 40 : 46;
         ctx.font = `bold ${fontSize}px 'Segoe UI', sans-serif`;
 
-        const text = movies[i].name;
-        const maxWidth = radius - 20;
+        const text = segments[i].name;
+        const maxWidth = radius - 76;
         let displayText = text;
         if (ctx.measureText(text).width > maxWidth) {
             while (ctx.measureText(displayText + '…').width > maxWidth && displayText.length > 1) {
@@ -175,18 +555,50 @@ function drawWheel(rotation) {
             }
             displayText += '…';
         }
-        ctx.fillText(displayText, radius - 12, 0);
+        ctx.fillText(displayText, radius - 46, 0);
         ctx.restore();
+
+        currentAngle += arc;
     }
 
-    // Center dot
     ctx.beginPath();
-    ctx.arc(cx, cy, 12, 0, Math.PI * 2);
+    ctx.arc(cx, cy, 46, 0, Math.PI * 2);
     ctx.fillStyle = '#1a1a2e';
     ctx.fill();
     ctx.strokeStyle = '#3a3a52';
-    ctx.lineWidth = 2;
+    ctx.lineWidth = 7;
     ctx.stroke();
+}
+
+// ============================================================
+//  Winner Detection
+// ============================================================
+
+function getWinnerSegmentIndex() {
+    const count = segments.length;
+    if (count === 0) return -1;
+
+    const totalPts = getTotalWeight();
+    const pointerAngle = 0;
+
+    let currentAngle = wheelRotation;
+    for (let i = 0; i < count; i++) {
+        const arc = (segments[i].points / totalPts) * Math.PI * 2;
+        const start = currentAngle;
+        const end = start + arc;
+
+        const normStart = ((start % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+        const normEnd = ((end % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+        const normPointer = ((pointerAngle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+
+        if (normStart < normEnd) {
+            if (normPointer >= normStart && normPointer < normEnd) return i;
+        } else {
+            if (normPointer >= normStart || normPointer < normEnd) return i;
+        }
+        currentAngle += arc;
+    }
+    return 0;
 }
 
 // ============================================================
@@ -194,27 +606,28 @@ function drawWheel(rotation) {
 // ============================================================
 
 function spinWheel() {
-    if (isSpinning || movies.length < 1) return;
+    if (isSpinning || segments.length < 1) return;
     isSpinning = true;
     spinBtn.disabled = true;
     winnerDisplay.classList.add('hidden');
+    passBtn.classList.add('faded');
+    punishBtn.classList.add('faded');
+    returnMsg.classList.add('hidden');
+    lastWinnerInfo = null;
 
-    // How many full rotations + random offset
-    const extraRotations = 4 + Math.random() * 4; // 4–8 full spins
+    const extraRotations = 4 + Math.random() * 4;
     const targetAngle = extraRotations * Math.PI * 2 + Math.random() * Math.PI * 2;
     const targetRotation = wheelRotation + targetAngle;
-    const duration = 4000 + Math.random() * 2000; // 4–6 seconds
+    const duration = 4000 + Math.random() * 2000;
     const startTime = performance.now();
     const startRotation = wheelRotation;
 
     function animate(now) {
         const elapsed = now - startTime;
         const t = Math.min(elapsed / duration, 1);
-        // Ease out cubic
         const eased = 1 - Math.pow(1 - t, 3);
-        const currentRotation = startRotation + targetAngle * eased;
-        wheelRotation = currentRotation;
-        drawWheel(currentRotation);
+        wheelRotation = startRotation + targetAngle * eased;
+        drawWheel(wheelRotation);
 
         if (t < 1) {
             animFrameId = requestAnimationFrame(animate);
@@ -228,60 +641,84 @@ function spinWheel() {
     animFrameId = requestAnimationFrame(animate);
 }
 
-function getWinnerIndex() {
-    const count = movies.length;
-    if (count === 0) return -1;
-
-    // The pointer is at the top (12 o'clock = -π/2 direction)
-    // We need to find which segment the pointer (top-center) is pointing at
-    // The pointer is at angle -π/2 (straight up)
-    // Normalize: we want to find which segment contains the pointer direction
-    const pointerAngle = -Math.PI / 2; // top of the wheel
-
-    // Each segment i starts at (wheelRotation + i * arc)
-    // The segment's midpoint direction: wheelRotation + i * arc + arc/2
-    // We want the segment where the pointer angle falls within it
-
-    const arc = (2 * Math.PI) / count;
-
-    // Normalize the pointer angle relative to wheelRotation
-    // Segment i covers from (wheelRotation + i*arc) to (wheelRotation + (i+1)*arc)
-    // Find which i such that pointerAngle is in that range
-
-    for (let i = 0; i < count; i++) {
-        const start = wheelRotation + i * arc;
-        const end = start + arc;
-
-        // Normalize to [0, 2π)
-        const normStart = ((start % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-        const normEnd = ((end % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-        const normPointer = ((pointerAngle % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
-
-        if (normStart < normEnd) {
-            if (normPointer >= normStart && normPointer < normEnd) {
-                return i;
-            }
-        } else {
-            // Wraps around 0
-            if (normPointer >= normStart || normPointer < normEnd) {
-                return i;
-            }
-        }
-    }
-
-    return 0; // fallback
-}
-
 function onSpinComplete() {
-    const winner = getWinnerIndex();
-    if (winner >= 0 && winner < movies.length) {
-        const name = movies[winner].name;
-        winnerText.textContent = `🏆 ${name} 🏆`;
+    const idx = getWinnerSegmentIndex();
+    if (idx >= 0 && idx < segments.length) {
+        const seg = segments[idx];
+        const totalPts = getTotalWeight();
+        winnerText.textContent = `🏆 ${seg.name} 🏆`;
+        winnerDetails.textContent = `Weight: ${seg.points}/${totalPts} — by ${seg.watcherName}`;
         winnerDisplay.classList.remove('hidden');
         fireConfetti();
+
+        // Store for Pass/Punish
+        lastWinnerInfo = { seg, totalPts };
+
+        // Save the winner and process returns
+        const active = getActiveWatchers();
+        const participantNames = active.map(w => w.name).join(', ');
+        const participantIds = active.map(w => w.id);
+
+        saveWinner(seg.name, seg.watcherName, seg.points, totalPts, participantNames)
+            .then(saved => {
+                if (saved && saved.id) {
+                    lastWinnerInfo.winnerId = saved.id;
+                }
+                fetchWinners();
+            });
+
+        // Check for stolen points to return
+        const winnerData = allWatchers.find(w => w.name === seg.watcherName);
+        if (winnerData && participantIds.length > 1) {
+            fetch('/api/spin/process-win', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ winner_id: winnerData.id, participant_ids: participantIds }),
+            })
+            .then(r => r.json())
+            .then(data => {
+                if (data.returned && data.returned.length > 0) {
+                    const names = data.returned.map(r => `${r.victim_name} (${r.amount} pt${r.amount > 1 ? 's' : ''})`).join(', ');
+                    returnMsg.textContent = `🔄 Returned stolen points: ${names}`;
+                    returnMsg.classList.remove('hidden');
+                }
+                // Update winner points in allWatchers from response
+                if (data.winner) {
+                    const w = allWatchers.find(x => x.id === data.winner.id);
+                    if (w) w.points = data.winner.points;
+                }
+                // Refresh display
+                renderWatchers();
+                // Show judgement buttons
+                passBtn.classList.remove('faded');
+                punishBtn.classList.remove('faded');
+            })
+            .catch(() => {
+                passBtn.classList.remove('faded');
+                punishBtn.classList.remove('faded');
+            });
+        } else {
+            passBtn.classList.remove('faded');
+            punishBtn.classList.remove('faded');
+        }
+    } else {
+        isSpinning = false;
+        spinBtn.disabled = false;
     }
-    isSpinning = false;
-    spinBtn.disabled = false;
+}
+
+// ============================================================
+//  Wheel Info
+// ============================================================
+
+function updateWheelInfo() {
+    const totalPts = getTotalWeight();
+    if (totalPts > 0) {
+        wheelInfo.style.display = 'block';
+        totalWeight.textContent = `Total weight: ${totalPts}`;
+    } else {
+        wheelInfo.style.display = 'none';
+    }
 }
 
 // ============================================================
@@ -289,97 +726,373 @@ function onSpinComplete() {
 // ============================================================
 
 function fireConfetti() {
-    const colors = [
-        '#FF6B6B', '#FFD93D', '#6BCB77', '#4D96FF',
-        '#FF6BB5', '#A78BFA', '#FF9F43', '#00D2D3',
-    ];
-
+    const colors = ['#FF6B6B','#FFD93D','#6BCB77','#4D96FF','#FF6BB5','#A78BFA','#FF9F43','#00D2D3'];
     for (let i = 0; i < 60; i++) {
         const piece = document.createElement('div');
         piece.className = 'confetti-piece';
-
         const color = colors[Math.floor(Math.random() * colors.length)];
         const size = 6 + Math.random() * 8;
         const left = 10 + Math.random() * 80;
         const delay = Math.random() * 1.5;
-        const duration = 2 + Math.random() * 2;
+        const dur = 2 + Math.random() * 2;
         const rotation = Math.random() * 360;
         const xDrift = (Math.random() - 0.5) * 200;
-
         piece.style.cssText = `
-            left: ${left}%;
-            width: ${size}px;
-            height: ${size * (0.4 + Math.random() * 0.6)}px;
-            background: ${color};
-            border-radius: ${Math.random() > 0.5 ? '50%' : '2px'};
-            animation: confetti-fall ${duration}s ease-out ${delay}s forwards;
-            transform: rotate(${rotation}deg);
-            --x-drift: ${xDrift}px;
+            left: ${left}%; width: ${size}px; height: ${size * (0.4 + Math.random() * 0.6)}px;
+            background: ${color}; border-radius: ${Math.random() > 0.5 ? '50%' : '2px'};
+            animation: confetti-fall ${dur}s ease-out ${delay}s forwards;
+            transform: rotate(${rotation}deg); --x-drift: ${xDrift}px;
         `;
-
-        // Add horizontal drift
         piece.style.setProperty('--x-drift', `${xDrift}px`);
-
         document.body.appendChild(piece);
-
-        // Clean up after animation
-        setTimeout(() => piece.remove(), (duration + delay) * 1000 + 100);
+        setTimeout(() => piece.remove(), (dur + delay) * 1000 + 100);
     }
 }
 
-// Add horizontal drift to the confetti keyframes dynamically
 const styleSheet = document.createElement('style');
-styleSheet.textContent = `
-    @keyframes confetti-fall {
-        0% {
-            transform: translateY(0) rotate(0deg) translateX(0);
-            opacity: 1;
-        }
-        100% {
-            transform: translateY(100vh) rotate(720deg) translateX(var(--x-drift));
-            opacity: 0;
-        }
-    }
-`;
+styleSheet.textContent = `@keyframes confetti-fall {
+    0% { transform: translateY(0) rotate(0deg) translateX(0); opacity: 1; }
+    100% { transform: translateY(100vh) rotate(720deg) translateX(var(--x-drift)); opacity: 0; }
+}`;
 document.head.appendChild(styleSheet);
 
 // ============================================================
-//  Events
+//  Segments
 // ============================================================
 
-// Add movie
-async function handleAdd() {
-    const name = movieInput.value.trim();
-    if (!name) return;
+function computeSegments() {
+    segments = getActiveSegments();
+}
 
-    try {
-        await addMovie(name);
-        movieInput.value = '';
-        movieInput.focus();
-        renderList();
-        drawWheel(wheelRotation);
-    } catch (err) {
-        alert(err.message);
+// ============================================================
+//  Render All
+// ============================================================
+
+function renderAll() {
+    computeSegments();
+    renderWatchers();
+    drawWheel(wheelRotation);
+}
+
+// ============================================================
+//  Previous Winners Modal
+// ============================================================
+
+function renderWinnersList() {
+    winnersList.innerHTML = '';
+    if (winners.length === 0) {
+        winnersList.innerHTML = '<p class="empty-msg">No winners yet! Spin the wheel~ ✨</p>';
+        return;
+    }
+    for (const w of winners) {
+        const entry = document.createElement('div');
+        entry.className = 'winner-entry';
+
+        const left = document.createElement('div');
+        const t = document.createElement('div');
+        t.className = 'winner-entry-title';
+
+        // Show judgement emoji
+        let titleText = '';
+        if (w.judgement === 'pass') titleText = '👍 ';
+        else if (w.judgement === 'punish') titleText = '👎 ';
+        titleText += `🏆 ${w.title_name}`;
+        t.textContent = titleText;
+
+        const m = document.createElement('div');
+        m.className = 'winner-entry-meta';
+        let meta = `Weight: ${w.weight}/${w.total_weight} — by ${w.watcher_name}`;
+        if (w.participants) {
+            meta += `  •  🎬 ${w.participants}`;
+        }
+        m.textContent = meta;
+        left.appendChild(t);
+        left.appendChild(m);
+
+        // Right side: timestamp + retroactive voting
+        const rightCol = document.createElement('div');
+        rightCol.style.cssText = 'display:flex;flex-direction:column;align-items:flex-end;gap:0.3rem;';
+
+        const when = document.createElement('div');
+        when.className = 'winner-entry-when';
+        const d = new Date(w.won_at + 'Z');
+        when.textContent = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+        rightCol.appendChild(when);
+
+        // Retroactive voting arrows (only if no judgement yet)
+        if (!w.judgement || w.judgement === '') {
+            const voteRow = document.createElement('div');
+            voteRow.style.cssText = 'display:flex;gap:0.3rem;';
+
+            const upBtn = document.createElement('button');
+            upBtn.textContent = '👍';
+            upBtn.title = 'Mark as Pass';
+            upBtn.className = 'retro-vote-btn';
+            upBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                await fetch(`/api/winners/${w.id}/judgement`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ judgement: 'pass' }),
+                });
+                await fetchWinners();
+                renderWinnersList();
+            });
+
+            const downBtn = document.createElement('button');
+            downBtn.textContent = '👎';
+            downBtn.title = 'Mark as Punish';
+            downBtn.className = 'retro-vote-btn';
+            downBtn.addEventListener('click', async (e) => {
+                e.stopPropagation();
+                await fetch(`/api/winners/${w.id}/judgement`, {
+                    method: 'PATCH',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ judgement: 'punish' }),
+                });
+                await fetchWinners();
+                renderWinnersList();
+            });
+
+            voteRow.appendChild(upBtn);
+            voteRow.appendChild(downBtn);
+            rightCol.appendChild(voteRow);
+        }
+
+        entry.appendChild(left);
+        entry.appendChild(rightCol);
+        winnersList.appendChild(entry);
     }
 }
 
-addBtn.addEventListener('click', handleAdd);
-movieInput.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter') handleAdd();
+function openWinnersModal() {
+    renderWinnersList();
+    winnersModal.classList.remove('hidden');
+}
+
+function closeWinnersModal() {
+    winnersModal.classList.add('hidden');
+}
+
+// ============================================================
+//  Events — Participants Modal
+// ============================================================
+
+addWatcherBtn.addEventListener('click', openParticipantsModal);
+participantsCloseBtn.addEventListener('click', closeParticipantsModal);
+participantsModal.addEventListener('click', (e) => {
+    if (e.target === participantsModal) closeParticipantsModal();
 });
 
-// Spin
+// Start movie night
+startMovieNightBtn.addEventListener('click', () => {
+    closeParticipantsModal();
+    renderAll();
+});
+
+// Escape key for participant modal
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+        if (!participantsModal.classList.contains('hidden')) closeParticipantsModal();
+        if (!winnersModal.classList.contains('hidden')) closeWinnersModal();
+    }
+});
+
+// ============================================================
+//  Events — Spin
+// ============================================================
+
 spinBtn.addEventListener('click', spinWheel);
 
-// Clear all
-clearBtn.addEventListener('click', async () => {
-    if (movies.length === 0) return;
-    if (!confirm('Remove all movies?')) return;
-    await clearMovies();
-    wheelRotation = 0;
-    renderList();
-    drawWheel(wheelRotation);
-    winnerDisplay.classList.add('hidden');
+// ── Events — Pass / Punish ──
+
+passBtn.addEventListener('click', async () => {
+    // Pass: nothing changes, just re-enable spinning
+    passBtn.classList.add('faded');
+    punishBtn.classList.add('faded');
+    returnMsg.classList.add('hidden');
+    // Save judgement
+    if (lastWinnerInfo && lastWinnerInfo.winnerId) {
+        await fetch(`/api/winners/${lastWinnerInfo.winnerId}/judgement`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ judgement: 'pass' }),
+        }).then(() => fetchWinners());
+        // Remove the winning title as cleanup
+        if (lastWinnerInfo.seg && typeof lastWinnerInfo.seg.titleId === 'number') {
+            await deleteTitle(lastWinnerInfo.seg.titleId);
+        }
+    }
+    // Re-render to update the UI
+    renderAll();
+    isSpinning = false;
+    spinBtn.disabled = false;
+    lastWinnerInfo = null;
+});
+
+punishBtn.addEventListener('click', async () => {
+    if (!lastWinnerInfo) return;
+    const active = getActiveWatchers();
+    const participantIds = active.map(w => w.id);
+    const winnerData = allWatchers.find(w => w.name === lastWinnerInfo.seg.watcherName);
+    if (!winnerData) return;
+
+    try {
+        const res = await fetch('/api/spin/punish', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ winner_id: winnerData.id, participant_ids: participantIds }),
+        });
+        const data = await res.json();
+        if (!res.ok) { alert(data.error || 'Punish failed'); return; }
+
+        // Update points in allWatchers from response
+        if (data.winner) {
+            const w = allWatchers.find(x => x.id === data.winner.id);
+            if (w) w.points = data.winner.points;
+        }
+        // Update thief points (they were adjusted in API)
+        for (const s of data.stolen_from) {
+            // Refresh by fetching latest data
+        }
+        await fetchData(); // full refresh to get latest points
+        renderAll();
+        returnMsg.textContent = `👎 Punished! ${lastWinnerInfo.seg.watcherName} lost ${data.total_theft} point${data.total_theft !== 1 ? 's' : ''}`;
+        returnMsg.classList.remove('hidden');
+
+        // Save punish judgement
+        if (lastWinnerInfo.winnerId) {
+            await fetch(`/api/winners/${lastWinnerInfo.winnerId}/judgement`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ judgement: 'punish' }),
+            }).then(() => fetchWinners());
+        }
+
+        // Remove the winning title as cleanup
+        if (lastWinnerInfo.seg && typeof lastWinnerInfo.seg.titleId === 'number') {
+            await deleteTitle(lastWinnerInfo.seg.titleId);
+        }
+        // Re-render after title removal
+        renderAll();
+
+        // Re-enable spinning after a moment
+        setTimeout(() => {
+            passBtn.classList.add('faded');
+            punishBtn.classList.add('faded');
+            returnMsg.classList.add('hidden');
+            isSpinning = false;
+            spinBtn.disabled = false;
+            lastWinnerInfo = null;
+        }, 2000);
+    } catch (e) {
+        alert('Punish failed: ' + e.message);
+    }
+});
+
+// ── Events — Admin ──
+
+function renderAdminWatchers() {
+    adminWatchersList.innerHTML = '';
+    if (allWatchers.length === 0) {
+        adminWatchersList.innerHTML = '<p class="empty-msg">No watchers yet! Add one above. ✨</p>';
+        return;
+    }
+    for (const w of allWatchers) {
+        const row = document.createElement('div');
+        row.className = 'participant-row';
+
+        const nameSpan = document.createElement('span');
+        nameSpan.className = 'participant-name';
+        nameSpan.textContent = w.name;
+
+        const ptsInput = document.createElement('input');
+        ptsInput.type = 'number';
+        ptsInput.className = 'points-input';
+        ptsInput.value = w.points;
+        ptsInput.min = '-9999';
+        ptsInput.max = '9999';
+
+        const saveBtn = document.createElement('button');
+        saveBtn.className = 'btn btn-small btn-add';
+        saveBtn.textContent = '💾';
+        saveBtn.title = 'Save points';
+        saveBtn.addEventListener('click', async () => {
+            const newPts = parseInt(ptsInput.value) || 0;
+            try {
+                await adjustWatcherPoints(w.id, newPts - w.points);
+                await fetchData();
+                renderAdminWatchers();
+                renderAll();
+            } catch (e) { alert(e.message); }
+        });
+
+        const delBtn = document.createElement('button');
+        delBtn.className = 'watcher-del-btn';
+        delBtn.textContent = '✕';
+        delBtn.title = 'Delete watcher';
+        delBtn.addEventListener('click', async () => {
+            if (!confirm(`Delete "${w.name}" and all their titles?`)) return;
+            await deleteWatcher(w.id);
+            await fetchData();
+            renderAdminWatchers();
+            renderAll();
+        });
+
+        row.appendChild(nameSpan);
+        row.appendChild(ptsInput);
+        row.appendChild(saveBtn);
+        row.appendChild(delBtn);
+        adminWatchersList.appendChild(row);
+    }
+}
+
+async function openAdminModal() {
+    const ok = await verifyAdminPassword();
+    if (!ok) return;
+    renderAdminWatchers();
+    adminModal.classList.remove('hidden');
+}
+
+adminBtn.addEventListener('click', openAdminModal);
+adminCloseBtn.addEventListener('click', () => adminModal.classList.add('hidden'));
+adminModal.addEventListener('click', (e) => {
+    if (e.target === adminModal) adminModal.classList.add('hidden');
+});
+
+adminAddBtn.addEventListener('click', async () => {
+    const name = adminNewName.value.trim();
+    if (!name) { alert('Enter a watcher name'); return; }
+    const pts = parseInt(adminNewPoints.value) || 0;
+    try {
+        const w = await addWatcher(name, pts);
+        activeIds.add(w.id);
+        adminNewName.value = '';
+        adminNewPoints.value = '0';
+        renderAdminWatchers();
+        renderAll();
+    } catch (e) { alert(e.message); }
+});
+
+adminNewName.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') adminAddBtn.click();
+});
+
+// ============================================================
+//  Events — Previous Winners
+// ============================================================
+
+winnersBtn.addEventListener('click', openWinnersModal);
+modalCloseBtn.addEventListener('click', closeWinnersModal);
+winnersModal.addEventListener('click', (e) => {
+    if (e.target === winnersModal) closeWinnersModal();
+});
+
+clearWinnersBtn.addEventListener('click', async () => {
+    if (winners.length === 0) return;
+    if (!confirm('⚠️ This will permanently delete ALL winner history. Are you sure?')) return;
+    await clearAllWinners();
+    renderWinnersList();
 });
 
 // ============================================================
@@ -387,7 +1100,7 @@ clearBtn.addEventListener('click', async () => {
 // ============================================================
 
 (async function init() {
-    await fetchMovies();
-    renderList();
-    drawWheel(0);
+    await fetchData();
+    await fetchWinners();
+    renderAll();
 })();

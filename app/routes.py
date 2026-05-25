@@ -1,55 +1,420 @@
+import csv
+import io
+import os
 from flask import Blueprint, request, jsonify, current_app
 from .models import get_db
 
 bp = Blueprint('api', __name__, url_prefix='/api')
 
 
-@bp.route('/movies', methods=['GET'])
-def list_movies():
-    """Get all movies ordered by creation date."""
+# ── Data ──
+
+@bp.route('/data', methods=['GET'])
+def get_data():
+    """Get all watchers with their titles and points."""
     db = get_db(current_app)
-    rows = db.execute('SELECT id, name FROM movies ORDER BY created_at ASC').fetchall()
-    return jsonify([dict(r) for r in rows])
+    watchers = db.execute('SELECT id, name, points FROM watchers ORDER BY created_at ASC').fetchall()
+    result = []
+    for w in watchers:
+        titles = db.execute(
+            'SELECT id, name, points FROM titles WHERE watcher_id = ? ORDER BY created_at ASC',
+            (w['id'],)
+        ).fetchall()
+        result.append({
+            'id': w['id'],
+            'name': w['name'],
+            'points': w['points'],
+            'titles': [dict(t) for t in titles],
+        })
+    return jsonify(result)
 
 
-@bp.route('/movies', methods=['POST'])
-def add_movie():
-    """Add a new movie."""
+# ── Watchers ──
+
+@bp.route('/watchers', methods=['POST'])
+def add_watcher():
+    """Create a new watcher."""
     data = request.get_json(silent=True)
     if not data or not data.get('name', '').strip():
-        return jsonify({'error': 'Movie name is required'}), 400
+        return jsonify({'error': 'Watcher name is required'}), 400
 
     name = data['name'].strip()
-    if len(name) > 200:
-        return jsonify({'error': 'Movie name too long (max 200 chars)'}), 400
+    if len(name) > 100:
+        return jsonify({'error': 'Name too long (max 100 chars)'}), 400
+
+    try:
+        points = int(data.get('points', 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Points must be a number'}), 400
+    if points < -9999 or points > 9999:
+        return jsonify({'error': 'Points must be between -9999 and 9999'}), 400
 
     db = get_db(current_app)
 
-    # Check for duplicate
-    existing = db.execute('SELECT id FROM movies WHERE name = ?', (name,)).fetchone()
+    # Check for duplicate name (case-insensitive)
+    existing = db.execute('SELECT id FROM watchers WHERE LOWER(name) = LOWER(?)', (name,)).fetchone()
     if existing:
-        return jsonify({'error': 'Movie already in the list'}), 409
+        return jsonify({'error': f'A watcher named "{name}" already exists'}), 409
 
-    db.execute('INSERT INTO movies (name) VALUES (?)', (name,))
+    db.execute('INSERT INTO watchers (name, points) VALUES (?, ?)', (name, points))
     db.commit()
+    row = db.execute('SELECT id, name, points FROM watchers WHERE id = last_insert_rowid()').fetchone()
+    return jsonify({'id': row['id'], 'name': row['name'], 'points': row['points'], 'titles': []}), 201
 
-    row = db.execute('SELECT id, name FROM movies WHERE id = last_insert_rowid()').fetchone()
+
+@bp.route('/watchers/<int:watcher_id>', methods=['DELETE'])
+def delete_watcher(watcher_id):
+    """Remove a watcher and all their titles."""
+    db = get_db(current_app)
+    db.execute('DELETE FROM titles WHERE watcher_id = ?', (watcher_id,))
+    db.execute('DELETE FROM watchers WHERE id = ?', (watcher_id,))
+    db.commit()
+    return jsonify({'ok': True})
+
+
+@bp.route('/watchers/<int:watcher_id>/points', methods=['PATCH'])
+def update_watcher_points(watcher_id):
+    """Adjust a watcher's points by a delta (+1, -2, etc.)."""
+    data = request.get_json(silent=True)
+    if not data or 'delta' not in data:
+        return jsonify({'error': 'delta is required'}), 400
+
+    try:
+        delta = int(data['delta'])
+    except (TypeError, ValueError):
+        return jsonify({'error': 'delta must be a number'}), 400
+
+    db = get_db(current_app)
+    current = db.execute('SELECT points FROM watchers WHERE id = ?', (watcher_id,)).fetchone()
+    if not current:
+        return jsonify({'error': 'Watcher not found'}), 404
+
+    new_points = current['points'] + delta
+    if new_points > 9999:
+        return jsonify({'error': 'Points cannot exceed 9999'}), 400
+
+    db.execute('UPDATE watchers SET points = ? WHERE id = ?', (new_points, watcher_id))
+    db.commit()
+    return jsonify({'id': watcher_id, 'points': new_points, 'delta': delta})
+
+
+# ── Titles ──
+
+@bp.route('/titles', methods=['POST'])
+def add_title():
+    """Add a title to a watcher (max 3 per watcher)."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body is required'}), 400
+
+    name = data.get('name', '').strip()
+    if not name:
+        return jsonify({'error': 'Title name is required'}), 400
+    if len(name) > 200:
+        return jsonify({'error': 'Title too long (max 200 chars)'}), 400
+
+    watcher_id = data.get('watcher_id')
+    if not watcher_id:
+        return jsonify({'error': 'watcher_id is required'}), 400
+
+    try:
+        points = int(data.get('points', 1))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'Points must be a number'}), 400
+    if points < 1 or points > 100:
+        return jsonify({'error': 'Points must be between 1 and 100'}), 400
+
+    db = get_db(current_app)
+
+    # Enforce point budget: total title points cannot exceed watcher's personal points
+    watcher = db.execute('SELECT points FROM watchers WHERE id = ?', (watcher_id,)).fetchone()
+    if watcher:
+        other_total = db.execute(
+            'SELECT COALESCE(SUM(points), 0) as t FROM titles WHERE watcher_id = ?', (watcher_id,)
+        ).fetchone()['t']
+        personal_budget = max(1, watcher['points'])
+        max_for_this = max(1, personal_budget - other_total)
+        if points > max_for_this:
+            points = max_for_this
+
+    count = db.execute(
+        'SELECT COUNT(*) as c FROM titles WHERE watcher_id = ?', (watcher_id,)
+    ).fetchone()['c']
+    if count >= 3:
+        return jsonify({'error': 'Maximum 3 titles per watcher'}), 409
+
+    db.execute('INSERT INTO titles (watcher_id, name, points) VALUES (?, ?, ?)',
+               (watcher_id, name, points))
+    db.commit()
+    row = db.execute('SELECT id, watcher_id, name, points FROM titles WHERE id = last_insert_rowid()').fetchone()
     return jsonify(dict(row)), 201
 
 
-@bp.route('/movies/<int:movie_id>', methods=['DELETE'])
-def delete_movie(movie_id):
-    """Remove a movie by its ID."""
+@bp.route('/titles/<int:title_id>', methods=['PUT'])
+def update_title(title_id):
+    """Update a title's name or points."""
+    data = request.get_json(silent=True) or {}
     db = get_db(current_app)
-    db.execute('DELETE FROM movies WHERE id = ?', (movie_id,))
+    updates = []
+    params = []
+
+    if 'name' in data:
+        name = data['name'].strip()
+        if not name:
+            return jsonify({'error': 'Title name cannot be empty'}), 400
+        if len(name) > 200:
+            return jsonify({'error': 'Title too long'}), 400
+        updates.append('name = ?')
+        params.append(name)
+
+    if 'points' in data:
+        try:
+            points = int(data['points'])
+        except (TypeError, ValueError):
+            return jsonify({'error': 'Points must be a number'}), 400
+        if points < 1 or points > 100:
+            return jsonify({'error': 'Points must be between 1 and 100'}), 400
+
+        # Enforce point budget
+        title_row = db.execute('SELECT watcher_id FROM titles WHERE id = ?', (title_id,)).fetchone()
+        if title_row:
+            watcher = db.execute('SELECT points FROM watchers WHERE id = ?', (title_row['watcher_id'],)).fetchone()
+            if watcher:
+                other_total = db.execute(
+                    'SELECT COALESCE(SUM(points), 0) as t FROM titles WHERE watcher_id = ? AND id != ?',
+                    (title_row['watcher_id'], title_id)
+                ).fetchone()['t']
+                personal_budget = max(1, watcher['points'])
+                max_for_this = max(1, personal_budget - other_total)
+                if points > max_for_this:
+                    points = max_for_this
+
+        updates.append('points = ?')
+        params.append(points)
+
+    if not updates:
+        return jsonify({'error': 'Nothing to update'}), 400
+
+    params.append(title_id)
+    db.execute(f'UPDATE titles SET {", ".join(updates)} WHERE id = ?', params)
+    db.commit()
+    row = db.execute('SELECT id, watcher_id, name, points FROM titles WHERE id = ?', (title_id,)).fetchone()
+    return jsonify(dict(row))
+
+
+@bp.route('/titles/<int:title_id>', methods=['DELETE'])
+def delete_title(title_id):
+    """Remove a title."""
+    db = get_db(current_app)
+    db.execute('DELETE FROM titles WHERE id = ?', (title_id,))
     db.commit()
     return jsonify({'ok': True})
 
 
-@bp.route('/movies', methods=['DELETE'])
-def clear_movies():
-    """Remove all movies."""
+# ── Winners ──
+
+@bp.route('/winners', methods=['GET'])
+def list_winners():
+    """Get all previous winners, newest first."""
     db = get_db(current_app)
-    db.execute('DELETE FROM movies')
+    rows = db.execute(
+        'SELECT id, title_name, watcher_name, weight, total_weight, participants, judgement, won_at '
+        'FROM winners ORDER BY won_at DESC'
+    ).fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@bp.route('/winners', methods=['POST'])
+def save_winner():
+    """Record a new winner."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body is required'}), 400
+
+    title_name = data.get('title_name', '').strip()
+    watcher_name = data.get('watcher_name', '').strip()
+    if not title_name or not watcher_name:
+        return jsonify({'error': 'title_name and watcher_name are required'}), 400
+
+    try:
+        weight = int(data.get('weight', 0))
+        total_weight = int(data.get('total_weight', 0))
+    except (TypeError, ValueError):
+        return jsonify({'error': 'weight and total_weight must be numbers'}), 400
+
+    participants = data.get('participants', '')
+    if not isinstance(participants, str):
+        participants = ', '.join(participants) if isinstance(participants, list) else ''
+
+    db = get_db(current_app)
+    db.execute(
+        'INSERT INTO winners (title_name, watcher_name, weight, total_weight, participants) VALUES (?, ?, ?, ?, ?)',
+        (title_name, watcher_name, weight, total_weight, participants)
+    )
+    db.commit()
+    row = db.execute('SELECT id, title_name, watcher_name, weight, total_weight, participants, won_at FROM winners WHERE id = last_insert_rowid()').fetchone()
+    return jsonify(dict(row)), 201
+
+
+@bp.route('/winners', methods=['DELETE'])
+def clear_winners():
+    """Delete all winner history."""
+    db = get_db(current_app)
+    db.execute('DELETE FROM winners')
     db.commit()
     return jsonify({'ok': True})
+
+
+@bp.route('/winners/<int:winner_id>/judgement', methods=['PATCH'])
+def set_winner_judgement(winner_id):
+    """Set the pass/punish judgement for a winner."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body required'}), 400
+
+    judgement = data.get('judgement', '').strip().lower()
+    if judgement not in ('pass', 'punish', ''):
+        return jsonify({'error': 'Judgement must be "pass", "punish", or empty'}), 400
+
+    db = get_db(current_app)
+    db.execute('UPDATE winners SET judgement = ? WHERE id = ?', (judgement, winner_id))
+    db.commit()
+    return jsonify({'ok': True, 'judgement': judgement, 'winner_id': winner_id})
+
+
+# ── Spin / Punish / Return ──
+
+@bp.route('/spin/process-win', methods=['POST'])
+def process_win():
+    """When someone wins, return any points they've stolen from current participants."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body required'}), 400
+
+    winner_id = data.get('winner_id')
+    participant_ids = data.get('participant_ids', [])
+    if not winner_id or not participant_ids:
+        return jsonify({'error': 'winner_id and participant_ids required'}), 400
+
+    db = get_db(current_app)
+
+    # Find thefts where the winner stole from current participants
+    placeholders = ','.join('?' * len(participant_ids))
+    thefts = db.execute(
+        f'SELECT id, thief_id, victim_id, amount FROM thefts '
+        f'WHERE thief_id = ? AND victim_id IN ({placeholders})',
+        [winner_id] + participant_ids
+    ).fetchall()
+
+    returned = []
+    if thefts:
+        # For each theft, return points: sub from thief, add to victim
+        for t in thefts:
+            # Get victim name
+            victim = db.execute('SELECT name FROM watchers WHERE id = ?', (t['victim_id'],)).fetchone()
+            if not victim:
+                continue
+
+            # Transfer points back
+            thief_pts = db.execute('SELECT points FROM watchers WHERE id = ?', (t['thief_id'],)).fetchone()
+            victim_pts = db.execute('SELECT points FROM watchers WHERE id = ?', (t['victim_id'],)).fetchone()
+            if not thief_pts or not victim_pts:
+                continue
+
+            new_thief = thief_pts['points'] - t['amount']
+            new_victim = victim_pts['points'] + t['amount']
+            db.execute('UPDATE watchers SET points = ? WHERE id = ?', (new_thief, t['thief_id']))
+            db.execute('UPDATE watchers SET points = ? WHERE id = ?', (new_victim, t['victim_id']))
+
+            returned.append({
+                'victim_name': victim['name'],
+                'victim_id': t['victim_id'],
+                'amount': t['amount'],
+            })
+
+        # Delete the processed thefts
+        theft_ids = [t['id'] for t in thefts]
+        del_placeholders = ','.join('?' * len(theft_ids))
+        db.execute(f'DELETE FROM thefts WHERE id IN ({del_placeholders})', theft_ids)
+
+    db.commit()
+
+    # Get updated winner points
+    winner = db.execute('SELECT id, name, points FROM watchers WHERE id = ?', (winner_id,)).fetchone()
+
+    return jsonify({
+        'returned': returned,
+        'winner': dict(winner) if winner else None,
+    })
+
+
+@bp.route('/spin/punish', methods=['POST'])
+def punish_movie():
+    """Non-winners each steal 1 point from the winner."""
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body required'}), 400
+
+    winner_id = data.get('winner_id')
+    participant_ids = data.get('participant_ids', [])
+    if not winner_id or not participant_ids:
+        return jsonify({'error': 'winner_id and participant_ids required'}), 400
+
+    db = get_db(current_app)
+
+    # Get winner
+    winner = db.execute('SELECT name, points FROM watchers WHERE id = ?', (winner_id,)).fetchone()
+    if not winner:
+        return jsonify({'error': 'Winner not found'}), 404
+
+    stolen_from = []
+    total_theft = 0
+
+    for pid in participant_ids:
+        if pid == winner_id:
+            continue  # skip the winner
+
+        participant = db.execute('SELECT name FROM watchers WHERE id = ?', (pid,)).fetchone()
+        if not participant:
+            continue
+
+        # Steal 1 point from winner (can go negative)
+        new_winner_pts = winner['points'] - 1
+        participant_pts = db.execute('SELECT points FROM watchers WHERE id = ?', (pid,)).fetchone()
+        new_participant_pts = participant_pts['points'] + 1 if participant_pts else 1
+        db.execute('UPDATE watchers SET points = ? WHERE id = ?', (new_winner_pts, winner_id))
+        db.execute('UPDATE watchers SET points = ? WHERE id = ?', (new_participant_pts, pid))
+
+        # Record the theft
+        db.execute('INSERT INTO thefts (thief_id, victim_id, amount) VALUES (?, ?, 1)',
+                   (pid, winner_id))
+
+        stolen_from.append({
+            'thief_name': participant['name'],
+            'thief_id': pid,
+            'amount': 1,
+        })
+        total_theft += 1
+        winner = {'name': winner['name'], 'points': new_winner_pts}  # update local ref
+
+    db.commit()
+
+    # Get final winner points
+    final_winner = db.execute('SELECT id, name, points FROM watchers WHERE id = ?', (winner_id,)).fetchone()
+
+    return jsonify({
+        'stolen_from': stolen_from,
+        'total_theft': total_theft,
+        'winner': dict(final_winner) if final_winner else None,
+    })
+
+
+# ── Admin ──
+
+@bp.route('/admin/verify', methods=['POST'])
+def verify_admin():
+    """Check if the provided admin password is correct."""
+    data = request.get_json(silent=True)
+    pw = (data or {}).get('password', '')
+    admin_pw = os.environ.get('ADMIN_PASSWORD', 'setadminpass')
+    return jsonify({'ok': pw == admin_pw})

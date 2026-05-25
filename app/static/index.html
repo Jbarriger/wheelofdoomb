@@ -13,37 +13,116 @@
             <h1>🎡 Wheel of Doom<sup>(b)</sup></h1>
         </header>
 
-        <!-- Add Movie -->
+        <!-- Top Buttons -->
         <div class="add-section">
-            <input type="text" id="movieInput" placeholder="Enter a movie name..." maxlength="200" />
-            <button id="addBtn" class="btn btn-add">➕ Add Movie</button>
+            <button id="addWatcherBtn" class="btn btn-add">👤 Select Watchers</button>
+            <button id="winnersBtn" class="btn btn-winners">🏆 Previous Winners</button>
+            <button id="adminBtn" class="btn btn-admin">🔧 Admin</button>
         </div>
 
         <!-- Main Layout -->
         <div class="main-layout">
-            <!-- Movie List -->
-            <div class="list-panel">
-                <h2>Movie List</h2>
-                <ul id="movieList"></ul>
-                <p id="emptyMsg" class="empty-msg">No movies yet! Add some above. ✨</p>
-                <button id="clearBtn" class="btn btn-clear">🗑️ Clear All</button>
+            <!-- Watchers Panel -->
+            <div class="list-panel" id="watchersPanel">
+                <h2>Participants</h2>
+                <div id="watchersContainer"></div>
+                <p id="emptyMsg" class="empty-msg">No participants yet! Click "Select Watchers" above. ✨</p>
             </div>
 
             <!-- Wheel Panel -->
             <div class="wheel-panel">
                 <div class="wheel-wrapper">
                     <div class="pointer">▼</div>
-                    <canvas id="wheelCanvas" width="400" height="400"></canvas>
+                    <canvas id="wheelCanvas" width="1500" height="1500"></canvas>
                 </div>
-                <button id="spinBtn" class="btn btn-spin" disabled>🎯 SPIN!</button>
+                <div class="wheel-info" id="wheelInfo">
+                    <span id="totalWeight">Total weight: 0</span>
+                </div>
+
+                <!-- Action Row: Pass + SPIN + Punish on same line -->
+                <div class="action-row">
+                    <button id="passBtn" class="btn btn-pass action-btn faded">👍 Pass</button>
+                    <button id="spinBtn" class="btn btn-spin" disabled>🎯 SPIN!</button>
+                    <button id="punishBtn" class="btn btn-punish action-btn faded">👎 Punish</button>
+                </div>
+                <div id="returnMsg" class="return-msg hidden"></div>
 
                 <!-- Winner Display -->
                 <div id="winnerDisplay" class="winner-display hidden">
-                    <span id="winnerText" class="winner-text"></span>
+                    <div id="winnerText" class="winner-text"></div>
+                    <div id="winnerDetails" class="winner-details"></div>
                 </div>
             </div>
         </div>
     </div>
+
+    <!-- Select Participants Modal -->
+    <div id="participantsModal" class="modal-overlay hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>👤 Select Participants</h2>
+                <button id="participantsCloseBtn" class="modal-close-btn">✕</button>
+            </div>
+            <div class="modal-body">
+                <div id="allWatchersList"></div>
+            </div>
+            <div class="modal-footer">
+                <button id="startMovieNightBtn" class="btn btn-start">🎬 Start Movie Night!</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Previous Winners Modal -->
+    <div id="winnersModal" class="modal-overlay hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>🏆 Previous Winners</h2>
+                <button id="modalCloseBtn" class="modal-close-btn">✕</button>
+            </div>
+            <div class="modal-body" id="winnersList">
+                <p class="empty-msg">No winners yet! Spin the wheel~ ✨</p>
+            </div>
+            <div class="modal-footer">
+                <button id="clearWinnersBtn" class="btn btn-clear-winners">🗑️ Clear History</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Admin Modal -->
+    <div id="adminModal" class="modal-overlay hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>🔧 Admin Panel</h2>
+                <button id="adminCloseBtn" class="modal-close-btn">✕</button>
+            </div>
+            <div class="modal-body">
+                <div class="new-watcher-row" style="margin-bottom:1rem">
+                    <input type="text" id="adminNewName" placeholder="Watcher name..." maxlength="100" />
+                    <input type="number" id="adminNewPoints" class="points-input" value="0" min="-9999" max="9999" />
+                    <button id="adminAddBtn" class="btn btn-small btn-add">➕ Add</button>
+                </div>
+                <div id="adminWatchersList"></div>
+            </div>
+        </div>
+    </div>
+
+    <style>
+        .retro-vote-btn {
+            background: none;
+            border: 1px solid #3a3a52;
+            border-radius: 6px;
+            padding: 0.2rem 0.4rem;
+            font-size: 0.9rem;
+            cursor: pointer;
+            transition: all 0.15s;
+            line-height: 1;
+        }
+        .retro-vote-btn:hover {
+            background: #2a2a3e;
+            border-color: #6bcb77;
+            transform: scale(1.1);
+        }
+    </style>
 
     <script src="app.js"></script>
 </body>

@@ -17,6 +17,7 @@ services:
     restart: unless-stopped
     environment:
       - DB_DIR=/data
+      - ADMIN_PASSWORD=setadminpass
 
 volumes:
   wheel-data:
