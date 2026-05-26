@@ -212,10 +212,12 @@ function getActiveSegments() {
         if (!activeIds.has(w.id)) continue;
         for (const t of w.titles) {
             if (t.name.trim()) {
-                segs.push({ name: t.name, points: t.points, watcherName: w.name, titleId: t.id });
+                segs.push({ name: t.name, points: t.points, watcherName: w.name, titleId: t.id, displayOrder: t.display_order });
             }
         }
     }
+    // Global sort by server-assigned display_order so all clients see the same order
+    segs.sort((a, b) => (a.displayOrder ?? 0) - (b.displayOrder ?? 0));
     return segs;
 }
 
@@ -635,13 +637,21 @@ function drawWheel(rotation) {
         currentAngle += arc;
     }
 
+    // Center circle — clickable SPIN button
+    const centerR = 80;
     ctx.beginPath();
-    ctx.arc(cx, cy, 46, 0, Math.PI * 2);
+    ctx.arc(cx, cy, centerR, 0, Math.PI * 2);
     ctx.fillStyle = '#1a1a2e';
     ctx.fill();
     ctx.strokeStyle = '#3a3a52';
-    ctx.lineWidth = 7;
+    ctx.lineWidth = 8;
     ctx.stroke();
+    // SPIN label
+    ctx.fillStyle = '#ffd93d';
+    ctx.font = 'bold 44px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('SPIN', cx, cy);
 }
 
 // ============================================================
@@ -701,11 +711,12 @@ function spinWheel() {
     }
 
     isSpinning = true;
-    spinBtn.disabled = true;
     winnerDisplay.classList.add('hidden');
     passBtn.classList.add('faded');
     punishBtn.classList.add('faded');
     returnMsg.classList.add('hidden');
+    spinBtn.classList.add('faded');
+    spinBtn.disabled = true;
     lastWinnerInfo = null;
     // Reset message color
     returnMsg.style.color = '';
@@ -746,60 +757,85 @@ function onSpinComplete() {
         winnerDisplay.classList.remove('hidden');
         fireConfetti();
 
-        // Store for Pass/Punish
+        // Store for Accept/Re-roll
         lastWinnerInfo = { seg, totalPts };
+        isSpinning = false;
 
-        // Save the winner and process returns
-        const active = getActiveWatchers();
-        const participantNames = active.map(w => w.name).join(', ');
-        const participantIds = active.map(w => w.id);
+        // Show Accept Results button, enable re-spin via center circle
+        spinBtn.classList.remove('faded');
+        spinBtn.disabled = false;
 
-        saveWinner(seg.name, seg.watcherName, seg.points, totalPts, participantNames)
-            .then(saved => {
-                if (saved && saved.id) {
-                    lastWinnerInfo.winnerId = saved.id;
-                }
-                fetchWinners();
-            });
+        // Broadcast final angle so all clients land on the exact same slice
+        const finalMod = ((wheelRotation % (2 * Math.PI)) + 2 * Math.PI) % (2 * Math.PI);
+        socket.emit('spin_completed', {
+            finalMod: finalMod,
+        });
+    } else {
+        isSpinning = false;
+    }
+}
 
-        // Check for stolen points to return
-        const winnerData = allWatchers.find(w => w.name === seg.watcherName);
-        if (winnerData && participantIds.length > 1) {
-            fetch('/api/spin/process-win', {
+// ============================================================
+//  Accept Results
+// ============================================================
+
+async function acceptResults() {
+    if (!lastWinnerInfo) return;
+    const seg = lastWinnerInfo.seg;
+    const active = getActiveWatchers();
+    const participantNames = active.map(w => w.name).join(', ');
+    const participantIds = active.map(w => w.id);
+
+    // Save winner to history
+    const saved = await saveWinner(
+        seg.name, seg.watcherName, seg.points,
+        lastWinnerInfo.totalPts, participantNames
+    );
+    if (saved && saved.id) {
+        lastWinnerInfo.winnerId = saved.id;
+        fetchWinners();
+    }
+
+    // Return stolen points
+    const winnerData = allWatchers.find(w => w.name === seg.watcherName);
+    if (winnerData && participantIds.length > 1) {
+        try {
+            const res = await fetch('/api/spin/process-win', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ winner_id: winnerData.id, participant_ids: participantIds }),
-            })
-            .then(r => r.json())
-            .then(data => {
-                if (data.returned && data.returned.length > 0) {
-                    const names = data.returned.map(r => `${r.victim_name} (${r.amount} pt${r.amount > 1 ? 's' : ''})`).join(', ');
-                    returnMsg.textContent = `🔄 Returned stolen points: ${names}`;
-                    returnMsg.classList.remove('hidden');
-                }
-                // Update winner points in allWatchers from response
-                if (data.winner) {
-                    const w = allWatchers.find(x => x.id === data.winner.id);
-                    if (w) w.points = data.winner.points;
-                }
-                // Refresh display and redraw wheel
-                renderAll();
-                // Show judgement buttons
-                passBtn.classList.remove('faded');
-                punishBtn.classList.remove('faded');
-            })
-            .catch(() => {
-                passBtn.classList.remove('faded');
-                punishBtn.classList.remove('faded');
             });
-        } else {
-            passBtn.classList.remove('faded');
-            punishBtn.classList.remove('faded');
-        }
-    } else {
-        isSpinning = false;
-        spinBtn.disabled = false;
+            const data = await res.json();
+            if (data.returned && data.returned.length > 0) {
+                const names = data.returned.map(
+                    r => `${r.victim_name} (${r.amount} pt${r.amount > 1 ? 's' : ''})`
+                ).join(', ');
+                returnMsg.textContent = `🔄 Returned stolen points: ${names}`;
+                returnMsg.classList.remove('hidden');
+            }
+            if (data.winner) {
+                const w = allWatchers.find(x => x.id === data.winner.id);
+                if (w) w.points = data.winner.points;
+            }
+        } catch {}
     }
+
+    // Remove the winning title
+    if (typeof seg.titleId === 'number') {
+        await deleteTitle(seg.titleId);
+    }
+
+    // Refresh display
+    await fetchData();
+    renderAll();
+
+    // Show Pass / Punish
+    passBtn.classList.remove('faded');
+    punishBtn.classList.remove('faded');
+
+    // Hide Accept button
+    spinBtn.classList.add('faded');
+    spinBtn.disabled = true;
 }
 
 // ============================================================
@@ -856,12 +892,8 @@ document.head.appendChild(styleSheet);
 // ============================================================
 
 function computeSegments() {
+    // Segments come from the API pre-sorted by display_order (server-shuffled)
     segments = getActiveSegments();
-    // Fisher-Yates shuffle so the same watcher's titles aren't clumped together
-    for (let i = segments.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [segments[i], segments[j]] = [segments[j], segments[i]];
-    }
 }
 
 // ============================================================
@@ -1002,16 +1034,15 @@ document.addEventListener('keydown', (e) => {
 //  Events — Spin
 // ============================================================
 
-spinBtn.addEventListener('click', spinWheel);
+spinBtn.addEventListener('click', acceptResults);
 
 // ── Events — Pass / Punish ──
 
 passBtn.addEventListener('click', async () => {
-    // Pass: nothing changes, just re-enable spinning
+    // Pass: save judgement & reset punish streak
     passBtn.classList.add('faded');
     punishBtn.classList.add('faded');
     returnMsg.classList.add('hidden');
-    // Save judgement & reset punish streak
     if (lastWinnerInfo && lastWinnerInfo.winnerId) {
         await fetch(`/api/winners/${lastWinnerInfo.winnerId}/judgement`, {
             method: 'PATCH',
@@ -1027,15 +1058,8 @@ passBtn.addEventListener('click', async () => {
                 body: JSON.stringify({ winner_id: winnerData2.id }),
             });
         }
-        // Remove the winning title as cleanup
-        if (lastWinnerInfo.seg && typeof lastWinnerInfo.seg.titleId === 'number') {
-            await deleteTitle(lastWinnerInfo.seg.titleId);
-        }
     }
-    // Re-render to update the UI
-    renderAll();
     isSpinning = false;
-    spinBtn.disabled = false;
     lastWinnerInfo = null;
 });
 
@@ -1078,20 +1102,11 @@ punishBtn.addEventListener('click', async () => {
             }).then(() => fetchWinners());
         }
 
-        // Remove the winning title as cleanup
-        if (lastWinnerInfo.seg && typeof lastWinnerInfo.seg.titleId === 'number') {
-            await deleteTitle(lastWinnerInfo.seg.titleId);
-        }
-        // Re-render after title removal
-        renderAll();
-
-        // Re-enable spinning after a moment
+        // Re-enable center spin after a moment
         setTimeout(() => {
-            passBtn.classList.add('faded');
             punishBtn.classList.add('faded');
             returnMsg.classList.add('hidden');
             isSpinning = false;
-            spinBtn.disabled = false;
             lastWinnerInfo = null;
         }, 2000);
     } catch (e) {
@@ -1230,11 +1245,81 @@ socket.on('data_changed', () => {
     fetchData().then(renderAll);
 });
 
+socket.on('spin_completed', (data) => {
+    // Don't override if we're mid-spin ourselves
+    if (isSpinning) return;
+    // Don't override if Accept is showing (local spinner already handled this)
+    if (!spinBtn.classList.contains('faded')) return;
+
+    // All clients have the same segment order (DB display_order), so the same
+    // final angle lands on the same slice for everyone.
+    const fullTurns = (4 + Math.random() * 4) * Math.PI * 2;
+    const targetRotation = data.finalMod + fullTurns;
+    let delta = targetRotation - (wheelRotation % (2 * Math.PI));
+    if (delta < 0) delta += Math.PI * 2;
+    if (delta < Math.PI * 2 * 4) delta += Math.PI * 2 * (4 + Math.floor(Math.random() * 4));
+
+    const finalTarget = wheelRotation + delta;
+    const duration = 4000 + Math.random() * 2000;
+    const startTime = performance.now();
+    const startRotation = wheelRotation;
+    isSpinning = true;
+
+    function animate(now) {
+        const elapsed = now - startTime;
+        const t = Math.min(elapsed / duration, 1);
+        const eased = 1 - Math.pow(1 - t, 3);
+        wheelRotation = startRotation + delta * eased;
+        drawWheel(wheelRotation);
+        if (t < 1) {
+            animFrameId = requestAnimationFrame(animate);
+        } else {
+            wheelRotation = finalTarget;
+            drawWheel(wheelRotation);
+            // Determine winner from wheel position (same for all clients)
+            const idx = getWinnerSegmentIndex();
+            if (idx >= 0) {
+                const seg = segments[idx];
+                const totalPts = getTotalWeight();
+                winnerText.textContent = `\uD83C\uDFC6 ${seg.name} \uD83C\uDFC6`;
+                winnerDetails.textContent = `Weight: ${seg.points}/${totalPts} - by ${seg.watcherName}`;
+                winnerDisplay.classList.remove('hidden');
+                fireConfetti();
+            }
+            isSpinning = false;
+        }
+    }
+    animFrameId = requestAnimationFrame(animate);
+    // Accept button is NOT shown on remote clients (spinner only)
+    spinBtn.classList.add('faded');
+    spinBtn.disabled = true;
+});
+
 socket.on('winners_changed', () => {
     if (!winnersModal.classList.contains('hidden')) {
         fetchWinners();
         renderWinnersList();
     }
+});
+
+// Canvas: center circle click → SPIN
+const CENTER_R = 80;
+canvas.addEventListener('click', (e) => {
+    if (isSpinning) return;
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+    const dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+    if (dist <= CENTER_R) spinWheel();
+});
+
+// Canvas: pointer cursor on center hover
+canvas.addEventListener('mousemove', (e) => {
+    const rect = canvas.getBoundingClientRect();
+    const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+    const y = (e.clientY - rect.top) * (canvas.height / rect.height);
+    const dist = Math.sqrt((x - cx) ** 2 + (y - cy) ** 2);
+    canvas.style.cursor = (dist <= CENTER_R && !isSpinning) ? 'pointer' : 'default';
 });
 
 (async function init() {

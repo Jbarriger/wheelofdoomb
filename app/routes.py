@@ -1,4 +1,5 @@
 import os
+import random
 from flask import Blueprint, request, jsonify, current_app
 from .models import get_db
 from .socketio_ext import socketio
@@ -28,6 +29,15 @@ def _enforce_title_budget(db, watcher_id, points, exclude_title_id=None):
     return round(min(points, remaining), 2)
 
 
+def reshuffle_title_order(db):
+    """Randomize display_order for all titles so no one user's titles are clumped."""
+    rows = db.execute('SELECT id FROM titles ORDER BY id').fetchall()
+    ids = [r['id'] for r in rows]
+    random.shuffle(ids)
+    for i, tid in enumerate(ids):
+        db.execute('UPDATE titles SET display_order = ? WHERE id = ?', (i, tid))
+
+
 # ── Data ──
 
 @bp.route('/data', methods=['GET'])
@@ -38,7 +48,7 @@ def get_data():
     result = []
     for w in watchers:
         titles = db.execute(
-            'SELECT id, name, points FROM titles WHERE watcher_id = ? ORDER BY created_at ASC',
+            'SELECT id, name, points, display_order FROM titles WHERE watcher_id = ? ORDER BY display_order ASC',
             (w['id'],)
         ).fetchall()
         result.append({
@@ -91,6 +101,7 @@ def delete_watcher(watcher_id):
     db = get_db(current_app)
     db.execute('DELETE FROM titles WHERE watcher_id = ?', (watcher_id,))
     db.execute('DELETE FROM watchers WHERE id = ?', (watcher_id,))
+    reshuffle_title_order(db)
     db.commit()
     socketio.emit('data_changed', {})
     return jsonify({'ok': True})
@@ -164,6 +175,7 @@ def add_title():
 
     db.execute('INSERT INTO titles (watcher_id, name, points) VALUES (?, ?, ?)',
                (watcher_id, name, points))
+    reshuffle_title_order(db)
     db.commit()
     socketio.emit('data_changed', {})
     row = db.execute('SELECT id, watcher_id, name, points FROM titles WHERE id = last_insert_rowid()').fetchone()
@@ -221,6 +233,7 @@ def delete_title(title_id):
     """Remove a title."""
     db = get_db(current_app)
     db.execute('DELETE FROM titles WHERE id = ?', (title_id,))
+    reshuffle_title_order(db)
     db.commit()
     socketio.emit('data_changed', {})
     return jsonify({'ok': True})
@@ -475,3 +488,11 @@ def verify_admin():
     pw = (data or {}).get('password', '')
     admin_pw = os.environ.get('ADMIN_PASSWORD', 'setadminpass')
     return jsonify({'ok': pw == admin_pw})
+
+
+# ── SocketIO Events ──
+
+@socketio.on('spin_completed')
+def handle_spin_completed(data):
+    """Broadcast spin result to all other connected clients."""
+    socketio.emit('spin_completed', data)

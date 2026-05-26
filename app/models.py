@@ -41,12 +41,18 @@ def init_db(app):
             db.execute('ALTER TABLE watchers ADD COLUMN punish_streak INTEGER NOT NULL DEFAULT 0')
         except sqlite3.OperationalError:
             pass  # column already exists
+        # Migration: add display_order column if upgrading from older schema
+        try:
+            db.execute('ALTER TABLE titles ADD COLUMN display_order INTEGER NOT NULL DEFAULT 0')
+        except sqlite3.OperationalError:
+            pass  # column already exists
         db.execute('''
             CREATE TABLE IF NOT EXISTS titles (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 watcher_id INTEGER NOT NULL,
                 name TEXT NOT NULL,
                 points INTEGER NOT NULL DEFAULT 1,
+                display_order INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT DEFAULT (datetime('now')),
                 FOREIGN KEY (watcher_id) REFERENCES watchers(id) ON DELETE CASCADE
             )
