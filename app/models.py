@@ -87,5 +87,10 @@ def init_db(app):
             db.execute('ALTER TABLE winners ADD COLUMN judgement TEXT DEFAULT ""')
         except sqlite3.OperationalError:
             pass
+        # Migration: add votes column to winners
+        try:
+            db.execute('ALTER TABLE winners ADD COLUMN votes TEXT DEFAULT "{}"')
+        except sqlite3.OperationalError:
+            pass
         db.commit()
     app.teardown_appcontext(close_db)

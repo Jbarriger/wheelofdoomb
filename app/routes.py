@@ -246,7 +246,7 @@ def list_winners():
     """Get all previous winners, newest first."""
     db = get_db(current_app)
     rows = db.execute(
-        'SELECT id, title_name, watcher_name, weight, total_weight, participants, judgement, won_at '
+        'SELECT id, title_name, watcher_name, weight, total_weight, participants, judgement, votes, won_at '
         'FROM winners ORDER BY won_at DESC'
     ).fetchall()
     return jsonify([dict(r) for r in rows])
@@ -311,6 +311,32 @@ def set_winner_judgement(winner_id):
     db.commit()
     socketio.emit('winners_changed', {})
     return jsonify({'ok': True, 'judgement': judgement, 'winner_id': winner_id})
+
+
+@bp.route('/winners/<int:winner_id>/verdict', methods=['PATCH'])
+def set_winner_verdict(winner_id):
+    """Set the judgement and per-watcher votes for a winner.
+    
+    Body: {judgement: 'pass'|'punish', votes: {watcher_id_str: 'pass'|'punish', ...}}
+    """
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({'error': 'Request body required'}), 400
+
+    judgement = data.get('judgement', '').strip().lower()
+    if judgement not in ('pass', 'punish'):
+        return jsonify({'error': 'Judgement must be "pass" or "punish"'}), 400
+
+    votes = data.get('votes', {})
+    import json
+    votes_json = json.dumps(votes)
+
+    db = get_db(current_app)
+    db.execute('UPDATE winners SET judgement = ?, votes = ? WHERE id = ?',
+               (judgement, votes_json, winner_id))
+    db.commit()
+    socketio.emit('winners_changed', {})
+    return jsonify({'ok': True, 'judgement': judgement, 'winner_id': winner_id, 'votes': votes})
 
 
 # ── Spin / Punish / Return ──
@@ -488,6 +514,27 @@ def verify_admin():
     pw = (data or {}).get('password', '')
     admin_pw = os.environ.get('ADMIN_PASSWORD', 'setadminpass')
     return jsonify({'ok': pw == admin_pw})
+
+
+@bp.route('/admin/watchers/<int:watcher_id>/reset-streak', methods=['POST'])
+def reset_streak(watcher_id):
+    """Reset a watcher's punish streak to 0."""
+    db = get_db(current_app)
+    watcher = db.execute('SELECT id, name, points, punish_streak FROM watchers WHERE id = ?', (watcher_id,)).fetchone()
+    if not watcher:
+        return jsonify({'error': 'Watcher not found'}), 404
+    db.execute('UPDATE watchers SET punish_streak = 0 WHERE id = ?', (watcher_id,))
+    db.commit()
+    socketio.emit('data_changed', {})
+    return jsonify({
+        'ok': True,
+        'watcher': {
+            'id': watcher['id'],
+            'name': watcher['name'],
+            'points': watcher['points'],
+            'punish_streak': 0,
+        },
+    })
 
 
 # ── SocketIO Events ──

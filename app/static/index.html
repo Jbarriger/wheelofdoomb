@@ -39,11 +39,9 @@
                     <span id="totalWeight">Total weight: 0</span>
                 </div>
 
-                <!-- Action Row: Pass + SPIN + Punish on same line -->
-                <div class="action-row">
-                    <button id="passBtn" class="btn btn-pass action-btn faded">👍 Pass</button>
+                <div class="action-row" id="actionRow">
+                    <button id="verdictBtn" class="btn btn-verdict action-btn faded">⚖️ Render Verdict</button>
                     <button id="spinBtn" class="btn btn-accept action-btn faded" disabled>✓ Accept ✓</button>
-                    <button id="punishBtn" class="btn btn-punish action-btn faded">👎 Punish</button>
                 </div>
                 <div id="returnMsg" class="return-msg hidden"></div>
 
@@ -106,21 +104,58 @@
         </div>
     </div>
 
+    <!-- Retro Vote Modal -->
+    <div id="retroVoteModal" class="modal-overlay hidden">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2>🗳️ Retro Vote</h2>
+                <button id="retroVoteCloseBtn" class="modal-close-btn">✕</button>
+            </div>
+            <div class="modal-body" id="retroVoteBody">
+                <p class="empty-msg">No participant data available for this entry.</p>
+            </div>
+            <div class="modal-footer">
+                <button id="retroVoteRecordBtn" class="btn btn-verdict">📝 Record Votes</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Password Prompt Modal -->
+    <div id="passwordModal" class="modal-overlay hidden">
+        <div class="modal-content" style="max-width:360px">
+            <div class="modal-header">
+                <h2>🔒 Admin Password</h2>
+            </div>
+            <div class="modal-body" style="text-align:center;padding:1.5rem">
+                <input type="password" id="passwordInput"
+                       placeholder="Enter password..."
+                       style="width:100%;padding:0.7rem 1rem;border:2px solid #2a2a3e;border-radius:8px;background:#1a1a2e;color:#e0e0e0;font-size:1rem;outline:none;text-align:center;"
+                       autofocus />
+            </div>
+            <div class="modal-footer" style="display:flex;gap:0.5rem;justify-content:flex-end">
+                <button id="passwordCancelBtn" class="btn btn-small" style="background:#3a3a52;color:#e0e0e0">Cancel</button>
+                <button id="passwordSubmitBtn" class="btn btn-small btn-add">Unlock</button>
+            </div>
+        </div>
+    </div>
+
     <style>
         .retro-vote-btn {
             background: none;
-            border: 1px solid #3a3a52;
-            border-radius: 6px;
-            padding: 0.2rem 0.4rem;
-            font-size: 0.9rem;
+            border: 1px solid #7c3aed;
+            border-radius: 8px;
+            padding: 0.25rem 0.6rem;
+            font-size: 0.8rem;
             cursor: pointer;
             transition: all 0.15s;
-            line-height: 1;
+            line-height: 1.4;
+            color: #a78bfa;
+            white-space: nowrap;
         }
         .retro-vote-btn:hover {
-            background: #2a2a3e;
-            border-color: #6bcb77;
-            transform: scale(1.1);
+            background: rgba(124, 58, 237, 0.15);
+            border-color: #a78bfa;
+            transform: scale(1.05);
         }
     </style>
 

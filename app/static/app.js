@@ -10,6 +10,8 @@ let isSpinning = false;
 let wheelRotation = 0;
 let animFrameId = null;
 let winners = [];
+let watcherVotes = {};   // {watcherId: 'pass'|'punish'}
+let showVoting = false;  // whether vote toggles + verdict btn are active
 
 // ---- localStorage helpers ----
 function saveActiveIds() {
@@ -54,8 +56,7 @@ const addNewWatcherBtn = document.getElementById('addNewWatcherBtn');
 const startMovieNightBtn = document.getElementById('startMovieNightBtn');
 
 // Judgement refs
-const passBtn = document.getElementById('passBtn');
-const punishBtn = document.getElementById('punishBtn');
+const verdictBtn = document.getElementById('verdictBtn');
 const returnMsg = document.getElementById('returnMsg');
 let lastWinnerInfo = null; // {seg, totalPts, winnerId}
 
@@ -68,23 +69,72 @@ const adminNewPoints = document.getElementById('adminNewPoints');
 const adminAddBtn = document.getElementById('adminAddBtn');
 const adminWatchersList = document.getElementById('adminWatchersList');
 
-async function verifyAdminPassword() {
-    const pw = prompt('🔒 Enter admin password:');
-    if (pw === null) return false;
-    try {
-        const res = await fetch('/api/admin/verify', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ password: pw }),
-        });
-        const data = await res.json();
-        if (data.ok) return true;
-        alert('Incorrect password!');
-        return false;
-    } catch {
-        alert('Failed to verify password');
-        return false;
-    }
+// Retro Vote refs
+const retroVoteModal = document.getElementById('retroVoteModal');
+const retroVoteCloseBtn = document.getElementById('retroVoteCloseBtn');
+const retroVoteBody = document.getElementById('retroVoteBody');
+const retroVoteRecordBtn = document.getElementById('retroVoteRecordBtn');
+let retroVoteWinnerId = null; // winner id being retro-voted
+let retroVotes = {}; // {watcherName: 'pass'|'punish'}
+
+// Password modal refs
+const passwordModal = document.getElementById('passwordModal');
+const passwordInput = document.getElementById('passwordInput');
+const passwordSubmitBtn = document.getElementById('passwordSubmitBtn');
+const passwordCancelBtn = document.getElementById('passwordCancelBtn');
+
+function verifyAdminPassword() {
+    return new Promise((resolve) => {
+        passwordInput.value = '';
+        passwordModal.classList.remove('hidden');
+        setTimeout(() => passwordInput.focus(), 100);
+
+        function cleanup() {
+            passwordModal.classList.add('hidden');
+            passwordSubmitBtn.removeEventListener('click', onSubmit);
+            passwordCancelBtn.removeEventListener('click', onCancel);
+            passwordInput.removeEventListener('keydown', onKey);
+            passwordModal.removeEventListener('click', onBackdrop);
+        }
+
+        async function onSubmit() {
+            const pw = passwordInput.value;
+            if (!pw) return;
+            cleanup();
+            try {
+                const res = await fetch('/api/admin/verify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ password: pw }),
+                });
+                const data = await res.json();
+                resolve(data.ok);
+                if (!data.ok) alert('Incorrect password!');
+            } catch {
+                alert('Failed to verify password');
+                resolve(false);
+            }
+        }
+
+        function onCancel() {
+            cleanup();
+            resolve(false);
+        }
+
+        function onKey(e) {
+            if (e.key === 'Enter') onSubmit();
+            if (e.key === 'Escape') onCancel();
+        }
+
+        function onBackdrop(e) {
+            if (e.target === passwordModal) onCancel();
+        }
+
+        passwordSubmitBtn.addEventListener('click', onSubmit);
+        passwordCancelBtn.addEventListener('click', onCancel);
+        passwordInput.addEventListener('keydown', onKey);
+        passwordModal.addEventListener('click', onBackdrop);
+    });
 }
 
 // ---- Colors ----
@@ -353,8 +403,10 @@ function renderWatchers() {
         const delBtn = document.createElement('button');
         delBtn.className = 'watcher-del-btn';
         delBtn.textContent = '✕';
-        delBtn.addEventListener('click', async () => {
-            await deleteWatcher(w.id);
+        delBtn.title = 'Remove from session';
+        delBtn.addEventListener('click', () => {
+            activeIds.delete(w.id);
+            saveActiveIds();
             computeSegments();
             renderAll();
         });
@@ -365,6 +417,20 @@ function renderWatchers() {
             streakHtml = `<span class="streak-badge">🔥x${w.punish_streak}</span>`;
         }
         header.innerHTML = `<span class="watcher-name">👤 ${escHtml(w.name)} <span class="${ptsClass}">${w.points}</span>${streakHtml}</span>`;
+        // Vote toggle when in voting mode
+        if (showVoting) {
+            const vote = watcherVotes[w.id] || 'pass';
+            const voteBtn = document.createElement('button');
+            voteBtn.className = `vote-toggle${vote === 'punish' ? ' vote-punish' : ''}`;
+            voteBtn.textContent = vote === 'pass' ? '👍 Pass' : '👎 Punish';
+            voteBtn.addEventListener('click', () => {
+                const newVote = watcherVotes[w.id] === 'pass' ? 'punish' : 'pass';
+                watcherVotes[w.id] = newVote;
+                voteBtn.className = `vote-toggle${newVote === 'punish' ? ' vote-punish' : ''}`;
+                voteBtn.textContent = newVote === 'pass' ? '👍 Pass' : '👎 Punish';
+            });
+            header.appendChild(voteBtn);
+        }
         header.appendChild(rightDiv);
         card.appendChild(header);
 
@@ -712,8 +778,10 @@ function spinWheel() {
 
     isSpinning = true;
     winnerDisplay.classList.add('hidden');
-    passBtn.classList.add('faded');
-    punishBtn.classList.add('faded');
+    showVoting = false;
+    watcherVotes = {};
+    verdictBtn.classList.add('faded');
+    verdictBtn.disabled = true;
     returnMsg.classList.add('hidden');
     spinBtn.classList.add('faded');
     spinBtn.disabled = true;
@@ -721,17 +789,18 @@ function spinWheel() {
     // Reset message color
     returnMsg.style.color = '';
 
-    const extraRotations = 4 + Math.random() * 4;
+    const extraRotations = 8 + Math.random() * 8;
     const targetAngle = extraRotations * Math.PI * 2 + Math.random() * Math.PI * 2;
     const targetRotation = wheelRotation + targetAngle;
-    const duration = 4000 + Math.random() * 2000;
+    const duration = 10000 + Math.random() * 5000;
     const startTime = performance.now();
     const startRotation = wheelRotation;
 
     function animate(now) {
         const elapsed = now - startTime;
         const t = Math.min(elapsed / duration, 1);
-        const eased = 1 - Math.pow(1 - t, 3);
+        // Variable-power ease-out: power ramps from 2 to 7 for extreme slow crawl at end
+        const eased = 1 - Math.pow(1 - t, 2 + 5 * t);
         wheelRotation = startRotation + targetAngle * eased;
         drawWheel(wheelRotation);
 
@@ -829,13 +898,119 @@ async function acceptResults() {
     await fetchData();
     renderAll();
 
-    // Show Pass / Punish
-    passBtn.classList.remove('faded');
-    punishBtn.classList.remove('faded');
+    // Activate voting mode: show vote toggles + Render Verdict button
+    showVoting = true;
+    const activeWatchers = getActiveWatchers();
+    watcherVotes = {};
+    for (const w of activeWatchers) {
+        watcherVotes[w.id] = 'pass';
+    }
+    renderWatchers();
+    verdictBtn.classList.remove('faded');
+    verdictBtn.disabled = false;
 
     // Hide Accept button
     spinBtn.classList.add('faded');
     spinBtn.disabled = true;
+}
+
+// ============================================================
+//  Render Verdict (replaces individual Pass / Punish)
+// ============================================================
+
+async function renderVerdict() {
+    if (!lastWinnerInfo) return;
+    const seg = lastWinnerInfo.seg;
+    const active = getActiveWatchers();
+
+    // Validate all watchers have cast a vote
+    const missing = active.filter(w => !watcherVotes[w.id]);
+    if (missing.length > 0) {
+        returnMsg.textContent = `⚠️ Waiting for votes from: ${missing.map(w => w.name).join(', ')}`;
+        returnMsg.classList.remove('hidden');
+        return;
+    }
+
+    // Tabulate votes
+    const punishCount = active.filter(w => watcherVotes[w.id] === 'punish').length;
+    const totalCount = active.length;
+    const isPunish = punishCount >= Math.ceil(totalCount / 2);
+
+    verdictBtn.classList.add('faded');
+    verdictBtn.disabled = true;
+    returnMsg.classList.add('hidden');
+
+    const winnerData = allWatchers.find(w => w.name === seg.watcherName);
+    if (!winnerData) { return; }
+
+    try {
+        // Record per-watcher votes + judgement in the winner entry
+        if (lastWinnerInfo.winnerId) {
+            const votesObj = {};
+            for (const w of active) {
+                votesObj[String(w.id)] = watcherVotes[w.id];
+            }
+            await fetch(`/api/winners/${lastWinnerInfo.winnerId}/verdict`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    judgement: isPunish ? 'punish' : 'pass',
+                    votes: votesObj,
+                }),
+            });
+            fetchWinners();
+        }
+
+        if (isPunish) {
+            // Execute punish logic
+            const active2 = getActiveWatchers();
+            const participantIds = active2.map(w => w.id);
+            const res = await fetch('/api/spin/punish', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ winner_id: winnerData.id, participant_ids: participantIds }),
+            });
+            const data = await res.json();
+            if (!res.ok) { alert(data.error || 'Punish failed'); return; }
+
+            if (data.winner) {
+                const w = allWatchers.find(x => x.id === data.winner.id);
+                if (w) {
+                    w.points = data.winner.points;
+                    w.punish_streak = data.winner.punish_streak;
+                }
+            }
+            await fetchData();
+            renderAll();
+            returnMsg.textContent = `👎 Punished! ${seg.watcherName} lost ${data.total_theft} point${data.total_theft !== 1 ? 's' : ''} (🔥x${data.multiplier} streak!)`;
+        } else {
+            // Execute pass logic
+            await fetch('/api/spin/pass', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ winner_id: winnerData.id }),
+            });
+            await fetchData();
+            renderAll();
+            returnMsg.textContent = `👍 Passed! ${seg.watcherName}'s streak reset to 0.`;
+        }
+        returnMsg.classList.remove('hidden');
+    } catch (e) {
+        alert('Render Verdict failed: ' + e.message);
+        return;
+    }
+
+    // Reset voting state after a short delay
+    setTimeout(() => {
+        showVoting = false;
+        watcherVotes = {};
+        renderWatchers();
+        verdictBtn.classList.add('faded');
+        verdictBtn.disabled = true;
+        returnMsg.classList.add('hidden');
+        isSpinning = false;
+        lastWinnerInfo = null;
+    }, 2500);
 }
 
 // ============================================================
@@ -941,6 +1116,26 @@ function renderWinnersList() {
         left.appendChild(t);
         left.appendChild(m);
 
+        // Show per-watcher votes if available
+        if (w.votes && w.votes !== '{}') {
+            try {
+                const votesData = JSON.parse(w.votes);
+                const voteList = Object.entries(votesData).map(([key, vote]) => {
+                    // Key can be a watcher ID (numeric) or watcher name (retro voting)
+                    const name = /^\d+$/.test(key)
+                        ? (allWatchers.find(x => x.id == key)?.name || `User #${key}`)
+                        : key;
+                    return `${vote === 'pass' ? '👍' : '👎'} ${name}`;
+                }).join(' · ');
+                if (voteList) {
+                    const v = document.createElement('div');
+                    v.className = 'winner-entry-votes';
+                    v.textContent = `Votes: ${voteList}`;
+                    left.appendChild(v);
+                }
+            } catch (e) { /* skip corrupt votes data */ }
+        }
+
         // Right side: timestamp + retroactive voting
         const rightCol = document.createElement('div');
         rightCol.style.cssText = 'display:flex;flex-direction:column;align-items:flex-end;gap:0.3rem;';
@@ -951,44 +1146,17 @@ function renderWinnersList() {
         when.textContent = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
         rightCol.appendChild(when);
 
-        // Retroactive voting arrows (only if no judgement yet)
-        if (!w.judgement || w.judgement === '') {
-            const voteRow = document.createElement('div');
-            voteRow.style.cssText = 'display:flex;gap:0.3rem;';
-
-            const upBtn = document.createElement('button');
-            upBtn.textContent = '👍';
-            upBtn.title = 'Mark as Pass';
-            upBtn.className = 'retro-vote-btn';
-            upBtn.addEventListener('click', async (e) => {
+        // Retro Vote button (only if no per-watcher votes recorded yet)
+        if (!w.votes || w.votes === '{}') {
+            const retroBtn = document.createElement('button');
+            retroBtn.textContent = '🗳️ Retro Vote';
+            retroBtn.title = 'Cast per-watcher votes for this entry';
+            retroBtn.className = 'retro-vote-btn';
+            retroBtn.addEventListener('click', (e) => {
                 e.stopPropagation();
-                await fetch(`/api/winners/${w.id}/judgement`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ judgement: 'pass' }),
-                });
-                await fetchWinners();
-                renderWinnersList();
+                openRetroVoteModal(w);
             });
-
-            const downBtn = document.createElement('button');
-            downBtn.textContent = '👎';
-            downBtn.title = 'Mark as Punish';
-            downBtn.className = 'retro-vote-btn';
-            downBtn.addEventListener('click', async (e) => {
-                e.stopPropagation();
-                await fetch(`/api/winners/${w.id}/judgement`, {
-                    method: 'PATCH',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ judgement: 'punish' }),
-                });
-                await fetchWinners();
-                renderWinnersList();
-            });
-
-            voteRow.appendChild(upBtn);
-            voteRow.appendChild(downBtn);
-            rightCol.appendChild(voteRow);
+            rightCol.appendChild(retroBtn);
         }
 
         entry.appendChild(left);
@@ -1007,6 +1175,91 @@ function closeWinnersModal() {
 }
 
 // ============================================================
+//  Retro Vote Modal
+// ============================================================
+
+function openRetroVoteModal(winner) {
+    retroVoteWinnerId = winner.id;
+    retroVotes = {};
+    retroVoteBody.innerHTML = '';
+
+    // Parse participants from the comma-separated names
+    let names = [];
+    if (winner.participants) {
+        names = winner.participants.split(',').map(s => s.trim()).filter(Boolean);
+    }
+
+    if (names.length === 0) {
+        retroVoteBody.innerHTML = '<p class="empty-msg">No participant list saved for this entry. Open the winner and note who was there.</p>';
+        retroVoteRecordBtn.disabled = true;
+    } else {
+        retroVoteRecordBtn.disabled = false;
+        for (const name of names) {
+            retroVotes[name] = 'pass';
+            const row = document.createElement('div');
+            row.className = 'participant-row';
+
+            const nameSpan = document.createElement('span');
+            nameSpan.className = 'participant-name';
+            nameSpan.textContent = name;
+
+            const toggle = document.createElement('button');
+            toggle.className = 'vote-toggle';
+            toggle.textContent = '👍 Pass';
+            toggle.dataset.vote = 'pass';
+            toggle.addEventListener('click', () => {
+                const newVote = retroVotes[name] === 'pass' ? 'punish' : 'pass';
+                retroVotes[name] = newVote;
+                toggle.className = `vote-toggle${newVote === 'punish' ? ' vote-punish' : ''}`;
+                toggle.textContent = newVote === 'pass' ? '👍 Pass' : '👎 Punish';
+            });
+
+            row.appendChild(nameSpan);
+            row.appendChild(toggle);
+            retroVoteBody.appendChild(row);
+        }
+    }
+
+    retroVoteModal.classList.remove('hidden');
+}
+
+async function recordRetroVote() {
+    const names = Object.keys(retroVotes);
+    if (names.length === 0 || !retroVoteWinnerId) return;
+
+    // Tabulate
+    const punishCount = names.filter(n => retroVotes[n] === 'punish').length;
+    const totalCount = names.length;
+    const isPunish = punishCount >= Math.ceil(totalCount / 2);
+
+    retroVoteRecordBtn.disabled = true;
+    retroVoteRecordBtn.textContent = '⏳ Saving...';
+
+    try {
+        // Record votes via the verdict endpoint
+        // We use names as keys since retro entries may not have stable watcher IDs
+        await fetch(`/api/winners/${retroVoteWinnerId}/verdict`, {
+            method: 'PATCH',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                judgement: isPunish ? 'punish' : 'pass',
+                votes: retroVotes,
+            }),
+        });
+        await fetchWinners();
+        retroVoteModal.classList.add('hidden');
+        renderWinnersList();
+    } catch (e) {
+        alert('Failed to record votes: ' + e.message);
+    }
+
+    retroVoteRecordBtn.disabled = false;
+    retroVoteRecordBtn.textContent = '📝 Record Votes';
+    retroVoteWinnerId = null;
+    retroVotes = {};
+}
+
+// ============================================================
 //  Events — Participants Modal
 // ============================================================
 
@@ -1022,13 +1275,22 @@ startMovieNightBtn.addEventListener('click', () => {
     renderAll();
 });
 
-// Escape key for participant modal
+// Escape key for modals
 document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
         if (!participantsModal.classList.contains('hidden')) closeParticipantsModal();
         if (!winnersModal.classList.contains('hidden')) closeWinnersModal();
+        if (!retroVoteModal.classList.contains('hidden')) retroVoteModal.classList.add('hidden');
     }
 });
+
+// ── Retro Vote Events ──
+
+retroVoteCloseBtn.addEventListener('click', () => retroVoteModal.classList.add('hidden'));
+retroVoteModal.addEventListener('click', (e) => {
+    if (e.target === retroVoteModal) retroVoteModal.classList.add('hidden');
+});
+retroVoteRecordBtn.addEventListener('click', recordRetroVote);
 
 // ============================================================
 //  Events — Spin
@@ -1036,83 +1298,9 @@ document.addEventListener('keydown', (e) => {
 
 spinBtn.addEventListener('click', acceptResults);
 
-// ── Events — Pass / Punish ──
+// ── Events — Verdict ──
 
-passBtn.addEventListener('click', async () => {
-    // Pass: save judgement & reset punish streak
-    passBtn.classList.add('faded');
-    punishBtn.classList.add('faded');
-    returnMsg.classList.add('hidden');
-    if (lastWinnerInfo && lastWinnerInfo.winnerId) {
-        await fetch(`/api/winners/${lastWinnerInfo.winnerId}/judgement`, {
-            method: 'PATCH',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ judgement: 'pass' }),
-        }).then(() => fetchWinners());
-        // Reset punish streak on the backend
-        const winnerData2 = allWatchers.find(w => w.name === lastWinnerInfo.seg.watcherName);
-        if (winnerData2) {
-            await fetch('/api/spin/pass', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ winner_id: winnerData2.id }),
-            });
-        }
-    }
-    isSpinning = false;
-    lastWinnerInfo = null;
-});
-
-punishBtn.addEventListener('click', async () => {
-    if (!lastWinnerInfo) return;
-    const active = getActiveWatchers();
-    const participantIds = active.map(w => w.id);
-    const winnerData = allWatchers.find(w => w.name === lastWinnerInfo.seg.watcherName);
-    if (!winnerData) return;
-
-    try {
-        const res = await fetch('/api/spin/punish', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ winner_id: winnerData.id, participant_ids: participantIds }),
-        });
-        const data = await res.json();
-        if (!res.ok) { alert(data.error || 'Punish failed'); return; }
-
-        // Update points and streak in allWatchers from response
-        if (data.winner) {
-            const w = allWatchers.find(x => x.id === data.winner.id);
-            if (w) {
-                w.points = data.winner.points;
-                w.punish_streak = data.winner.punish_streak;
-            }
-        }
-        // Full refresh to get latest state
-        await fetchData();
-        renderAll();
-        returnMsg.textContent = `👎 Punished! ${lastWinnerInfo.seg.watcherName} lost ${data.total_theft} point${data.total_theft !== 1 ? 's' : ''} (🔥x${data.multiplier} streak!)`;
-        returnMsg.classList.remove('hidden');
-
-        // Save punish judgement
-        if (lastWinnerInfo.winnerId) {
-            await fetch(`/api/winners/${lastWinnerInfo.winnerId}/judgement`, {
-                method: 'PATCH',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ judgement: 'punish' }),
-            }).then(() => fetchWinners());
-        }
-
-        // Re-enable center spin after a moment
-        setTimeout(() => {
-            punishBtn.classList.add('faded');
-            returnMsg.classList.add('hidden');
-            isSpinning = false;
-            lastWinnerInfo = null;
-        }, 2000);
-    } catch (e) {
-        alert('Punish failed: ' + e.message);
-    }
-});
+verdictBtn.addEventListener('click', renderVerdict);
 
 // ── Events — Admin ──
 
@@ -1154,6 +1342,26 @@ function renderAdminWatchers() {
                 renderAll();
             } catch (e) { alert(e.message); }
         });
+
+        // Reset streak button (only shown when streak > 0)
+        if (w.punish_streak > 0) {
+            const resetStreakBtn = document.createElement('button');
+            resetStreakBtn.className = 'btn btn-small';
+            resetStreakBtn.textContent = `🔄 x${w.punish_streak}`;
+            resetStreakBtn.title = 'Reset punish streak to 0';
+            resetStreakBtn.style.cssText = 'background:#5a3a3a;border:1px solid #8a4a4a;border-radius:6px;padding:0.2rem 0.4rem;cursor:pointer;font-size:0.85rem;';
+            resetStreakBtn.addEventListener('click', async () => {
+                if (!confirm(`Reset punish streak for "${w.name}"? (Currently 🔥x${w.punish_streak})`)) return;
+                try {
+                    const res = await fetch(`/api/admin/watchers/${w.id}/reset-streak`, { method: 'POST' });
+                    if (!res.ok) { alert('Failed to reset streak'); return; }
+                    await fetchData();
+                    renderAdminWatchers();
+                    renderAll();
+                } catch (e) { alert(e.message); }
+            });
+            row.appendChild(resetStreakBtn);
+        }
 
         const delBtn = document.createElement('button');
         delBtn.className = 'watcher-del-btn';
@@ -1232,10 +1440,13 @@ clearWinnersBtn.addEventListener('click', async () => {
 const socket = io();
 
 socket.on('data_changed', () => {
-    // Don't interrupt if user is in a modal or editing a title
+    // Don't interrupt if user is in a modal, editing a title, or in voting mode
     if (!participantsModal.classList.contains('hidden') ||
         !winnersModal.classList.contains('hidden') ||
         !adminModal.classList.contains('hidden')) {
+        return;
+    }
+    if (showVoting) {
         return;
     }
     const active = document.activeElement;
@@ -1253,14 +1464,14 @@ socket.on('spin_completed', (data) => {
 
     // All clients have the same segment order (DB display_order), so the same
     // final angle lands on the same slice for everyone.
-    const fullTurns = (4 + Math.random() * 4) * Math.PI * 2;
+    const fullTurns = (8 + Math.random() * 8) * Math.PI * 2;
     const targetRotation = data.finalMod + fullTurns;
     let delta = targetRotation - (wheelRotation % (2 * Math.PI));
     if (delta < 0) delta += Math.PI * 2;
-    if (delta < Math.PI * 2 * 4) delta += Math.PI * 2 * (4 + Math.floor(Math.random() * 4));
+    if (delta < Math.PI * 2 * 8) delta += Math.PI * 2 * (8 + Math.floor(Math.random() * 8));
 
     const finalTarget = wheelRotation + delta;
-    const duration = 4000 + Math.random() * 2000;
+    const duration = 10000 + Math.random() * 5000;
     const startTime = performance.now();
     const startRotation = wheelRotation;
     isSpinning = true;
@@ -1268,7 +1479,7 @@ socket.on('spin_completed', (data) => {
     function animate(now) {
         const elapsed = now - startTime;
         const t = Math.min(elapsed / duration, 1);
-        const eased = 1 - Math.pow(1 - t, 3);
+        const eased = 1 - Math.pow(1 - t, 2 + 5 * t);
         wheelRotation = startRotation + delta * eased;
         drawWheel(wheelRotation);
         if (t < 1) {

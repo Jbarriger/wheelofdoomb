@@ -159,7 +159,7 @@ header h1 sup {
     background: linear-gradient(135deg, #4d96ff, #6bcb77);
     color: #fff;
     font-size: 1.1rem;
-    padding: 0.8rem 1.5rem;
+    padding: 0.7rem 1.5rem;
 }
 
 .btn-accept:hover {
@@ -182,28 +182,50 @@ header h1 sup {
     transition: opacity 0.3s ease, transform 0.3s ease, visibility 0s 0.3s;
 }
 
-.btn-pass {
-    background: linear-gradient(135deg, #6bcb77, #4ecdc4);
-    color: #0f0f1a;
-    font-size: 1.1rem;
-    padding: 0.8rem 1.5rem;
-}
-
-.btn-pass:hover {
-    transform: scale(1.05);
-    box-shadow: 0 0 15px rgba(107, 203, 119, 0.4);
-}
-
-.btn-punish {
-    background: linear-gradient(135deg, #ff6b6b, #ff4757);
+.btn-verdict {
+    background: linear-gradient(135deg, #a78bfa, #7c3aed);
     color: #fff;
     font-size: 1.1rem;
-    padding: 0.8rem 1.5rem;
+    padding: 0.7rem 1.5rem;
 }
 
-.btn-punish:hover {
+.btn-verdict:hover {
     transform: scale(1.05);
-    box-shadow: 0 0 15px rgba(255, 107, 107, 0.4);
+    box-shadow: 0 0 15px rgba(167, 139, 250, 0.4);
+}
+
+/* ===== Vote Toggle ===== */
+.vote-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+    padding: 0.2rem 0.6rem;
+    border-radius: 6px;
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+    border: 1px solid #2ea043;
+    background: rgba(46, 160, 67, 0.1);
+    color: #6bcb77;
+    transition: all 0.15s;
+    line-height: 1.4;
+    flex-shrink: 0;
+}
+.vote-toggle:hover {
+    transform: scale(1.08);
+}
+.vote-toggle.vote-punish {
+    border-color: #da3633;
+    background: rgba(218, 54, 51, 0.1);
+    color: #ff6b6b;
+}
+
+/* ===== Winner Entry Votes ===== */
+.winner-entry-votes {
+    font-size: 0.8rem;
+    color: #999;
+    margin-top: 0.3rem;
+    line-height: 1.4;
 }
 
 .return-msg {
@@ -486,6 +508,22 @@ header h1 sup {
 .wheel-wrapper {
     position: relative;
     display: inline-block;
+}
+
+.action-row {
+    position: relative;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    margin-top: 1.2rem;
+    min-height: 52px;
+}
+
+#verdictBtn,
+#spinBtn {
+    position: absolute;
+    left: 50%;
+    transform: translateX(-50%);
 }
 
 .pointer {
